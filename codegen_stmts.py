@@ -3,7 +3,13 @@ import copy
 import os
 import sys
 
-from type_map import map_type, get_array_info, get_typed_list_elem, get_funcptr_info, get_vec_info, get_bitfield_info
+from type_map import map_type, _tuple_field_type, get_array_info, get_typed_list_elem, get_funcptr_info, get_vec_info, get_bitfield_info, TUPLE_RET_MAP
+
+
+_NARROW_INT_TYPES = frozenset({
+    "uint8_t", "int8_t", "uint16_t", "int16_t", "uint32_t", "int32_t",
+})
+_WIDE_INT_TYPES = frozenset({"int64_t", "int", "uint64_t"})
 
 
 class StmtMixin:
@@ -63,18 +69,37 @@ class StmtMixin:
                     fields.append((fname, ctype))
                 else:
                     ctype = map_type(item.annotation)
-                    self.emit(f"{ctype} {fname};")
-                    fields.append((fname, ctype))
+                    if ctype == "__array__":
+                        elem_type, size = get_array_info(item.annotation)
+                        self.emit(f"{elem_type} {fname}[{size}];")
+                        fields.append((fname, None))  # arrays not passable as ctor args
+                    elif ctype == "__funcptr__":
+                        info = get_funcptr_info(item.annotation)
+                        # Resolve funcptr type aliases
+                        if info is None and isinstance(item.annotation, ast.Name):
+                            info = self.funcptr_alias_infos.get(item.annotation.id)
+                        if info:
+                            ret, fp_args = info
+                            fp_arg_str = ", ".join(fp_args) if fp_args else "void"
+                            self.emit(f"{ret} (*{fname})({fp_arg_str});")
+                        else:
+                            self.emit(f"void *{fname};")
+                        fields.append((fname, None))  # funcptrs need special ctor handling
+                    else:
+                        self.emit(f"{ctype} {fname};")
+                        fields.append((fname, ctype))
         self.indent -= 1
         self.emit(f"}}{attr_str} {node.name};")
         self.emit("")
 
         # Emit constructor helper for MSVC compatibility
-        arg_list = ", ".join(f"{ct} {fn}" for fn, ct in fields)
-        self.emit(f"static inline {node.name} _mp_make_{node.name}({arg_list}) {{")
+        # Skip array/funcptr fields (ct==None) — they can't be passed by value
+        simple_fields = [(fn, ct) for fn, ct in fields if ct is not None]
+        arg_list = ", ".join(f"{ct} {fn}" for fn, ct in simple_fields)
+        self.emit(f"static inline {node.name} _mp_make_{node.name}({arg_list or 'void'}) {{")
         self.indent += 1
-        self.emit(f"{node.name} _s;")
-        for fn, ct in fields:
+        self.emit(f"{node.name} _s = {{0}};")
+        for fn, ct in simple_fields:
             self.emit(f"_s.{fn} = {fn};")
         self.emit(f"return _s;")
         self.indent -= 1
@@ -90,6 +115,21 @@ class StmtMixin:
             value=ast.Name(id="ptr", ctx=ast.Load()),
             slice=ast.Name(id=node.name, ctx=ast.Load()),
             ctx=ast.Load())
+
+        # Emit forward declarations so methods can call each other regardless of order
+        for item in methods:
+            synth = copy.deepcopy(item)
+            synth.name = f"{node.name}_{item.name}"
+            method_decs = self.get_decorators(item)
+            is_static = "staticmethod" in method_decs
+            if not is_static:
+                if synth.args.args and synth.args.args[0].arg == "self":
+                    synth.args.args[0].annotation = copy.deepcopy(ptr_annotation)
+                else:
+                    fwd_self = ast.arg(arg="self", annotation=copy.deepcopy(ptr_annotation))
+                    synth.args.args.insert(0, fwd_self)
+            self.compile_function(synth, self.current_module, prototype_only=True)
+        self.emit("")
 
         for item in methods:
             synth = copy.deepcopy(item)
@@ -187,9 +227,10 @@ class StmtMixin:
 
         walk_stmts(stmts)
 
-    def compile_function(self, node: ast.FunctionDef, module_name: str):
-        # Pre-scan body for lambda expressions, emit static helper functions before this function
-        self._scan_and_emit_lambdas(node.body)
+    def compile_function(self, node: ast.FunctionDef, module_name: str, prototype_only: bool = False):
+        if not prototype_only:
+            # Pre-scan body for lambda expressions, emit static helper functions before this function
+            self._scan_and_emit_lambdas(node.body)
         ret_type = map_type(node.returns)
         self.current_func_ret_type = ret_type
         args = []
@@ -204,6 +245,9 @@ class StmtMixin:
             atype = map_type(arg.annotation)
             if atype == "__funcptr__":
                 info = get_funcptr_info(arg.annotation)
+                # Resolve funcptr type aliases (e.g., SupportFunc = func[...])
+                if info is None and isinstance(arg.annotation, ast.Name):
+                    info = self.funcptr_alias_infos.get(arg.annotation.id)
                 if info:
                     ret, fp_args = info
                     fp_arg_str = ", ".join(fp_args) if fp_args else "void"
@@ -220,6 +264,10 @@ class StmtMixin:
             arg_str = (arg_str + ", ..." if args else "...")
         prefix = f"{module_name}_" if module_name != "__main__" else ""
         fname = node.name
+
+        # Record parameter types for use at call sites (auto-deref pointer args)
+        _param_ctypes = [map_type(a.annotation) for a in node.args.args]
+        self.func_param_types[f"{prefix}{fname}"] = _param_ctypes
 
         # C qualifiers and attributes from decorators
         decs = self.get_decorators(node)
@@ -243,9 +291,15 @@ class StmtMixin:
         attr_str = f" __attribute__(({', '.join(attrs)}))" if attrs else ""
 
         if fname == "main":
+            if prototype_only:
+                return
             self.emit(f"int main(void) {{")
         else:
-            self.emit(f"{qual_str}{ret_type}{attr_str} {prefix}{fname}({arg_str}) {{")
+            sig = f"{qual_str}{ret_type}{attr_str} {prefix}{fname}({arg_str})"
+            if prototype_only:
+                self.emit(f"{sig};")
+                return
+            self.emit(f"{sig} {{")
 
         self.indent += 1
         for stmt in node.body:
@@ -275,7 +329,7 @@ class StmtMixin:
     def compile_stmt(self, node):
         if hasattr(node, 'lineno'):
             self._current_line = node.lineno
-            if self._current_file:
+            if self._current_file and self.emit_line_directives:
                 # Emit #line directive so C compiler errors point to .mpy source
                 self.lines.append(f'#line {node.lineno} "{self._current_file}"')
         if isinstance(node, ast.AnnAssign):
@@ -329,6 +383,30 @@ class StmtMixin:
         else:
             lineno = getattr(node, 'lineno', '?')
             self.emit(f"/* TODO: unsupported statement '{type(node).__name__}' at line {lineno} */")
+
+    def _dest_type(self, target) -> str:
+        """Return the C type of an assignment target, or '' if unknown."""
+        if isinstance(target, ast.Name):
+            return self.local_vars.get(target.id) or self.mutable_globals.get(target.id, "")
+        if isinstance(target, ast.Attribute):
+            obj_type = self.infer_type(target.value)
+            base = obj_type.rstrip("*").strip()
+            for fn, ft in self.structs.get(base, []):
+                if fn == target.attr:
+                    return ft
+        if isinstance(target, ast.Subscript):
+            if isinstance(target.value, ast.Name):
+                info = self._array_vars.get(target.value.id)
+                if info:
+                    return info[0]
+        return ""
+
+    @staticmethod
+    def _coerce(val_expr: str, src_type: str, dest_type: str) -> str:
+        """Insert a C cast when assigning a wide int to a narrow int type."""
+        if dest_type in _NARROW_INT_TYPES and src_type not in _NARROW_INT_TYPES:
+            return f"({dest_type})({val_expr})"
+        return val_expr
 
     def compile_ann_assign(self, node: ast.AnnAssign):
         name = self.compile_expr(node.target)
@@ -416,6 +494,7 @@ class StmtMixin:
 
         if node.value:
             val = self.compile_expr(node.value)
+            val = self._coerce(val, self.infer_type(node.value), ctype)
             self.emit(f"{ctype} {name} = {val};")
         else:
             self.emit(f"{ctype} {name};")
@@ -446,6 +525,34 @@ class StmtMixin:
                         fname, ftype = self.structs[base][i]
                         self.local_vars[tgt] = ftype
                         self.emit(f"{ftype} {tgt} = {tmp}.{fname};")
+            elif ret_type.startswith("_TupleRet_"):
+                # Tuple return struct — unpack by field position
+                # Find the field key from TUPLE_RET_MAP
+                _fkey = None
+                for _k, _v in TUPLE_RET_MAP.items():
+                    if _v == ret_type:
+                        _fkey = _k
+                        break
+                tmp = f"_mp_unpack"
+                self.emit(f"{ret_type} {tmp} = {val};")
+                if _fkey:
+                    for i, tgt_node in enumerate(elts):
+                        if i >= len(_fkey):
+                            break
+                        tgt = self.compile_expr(tgt_node)
+                        _ft = _fkey[i]
+                        if "[" in _ft:
+                            # Array field: declare as array and memcpy
+                            bracket = _ft.index("[")
+                            _elem = _ft[:bracket]
+                            _size_str = _ft[bracket:]  # "[N]"
+                            _size_n = _size_str.strip("[]")
+                            self.emit(f"{_elem} {tgt}{_size_str};")
+                            self.emit(f"memcpy({tgt}, {tmp}.v{i}, {_size_n} * sizeof({_elem}));")
+                            self.local_vars[tgt] = _ft
+                        else:
+                            self.local_vars[tgt] = _ft
+                            self.emit(f"{_ft} {tgt} = {tmp}.v{i};")
             else:
                 self.emit(f"/* unpack */ __auto_type _mp_unpack = {val};")
             return
@@ -475,6 +582,7 @@ class StmtMixin:
                     continue
             val = self.compile_expr(val_node)
             tgt = self.compile_expr(target)
+            val = self._coerce(val, self.infer_type(val_node), self._dest_type(target))
             self.emit(f"{tgt} = {val};")
 
     def compile_aug_assign(self, node: ast.AugAssign):
@@ -487,14 +595,44 @@ class StmtMixin:
         if node.value:
             val = self.compile_expr(node.value)
             if isinstance(node.value, ast.Tuple):
-                elts = [self.compile_expr(e) for e in node.value.elts]
-                val = "{" + ", ".join(elts) + "}"
-                # Store in temp, run defers, then return
-                if hasattr(self, 'defer_stack') and self.defer_stack:
-                    self.emit(f"/* deferred cleanup (early return) */")
-                    for call in reversed(self.defer_stack):
-                        self.emit(f"{call};")
-                self.emit(f"return ({self._current_ret_type()}){val};")
+                ret_struct = self._current_ret_type()
+                # Check if any field in the tuple struct is an array (needs memcpy)
+                _tkey = TUPLE_RET_MAP.get(tuple(
+                    _tuple_field_type(e_ann) if hasattr(e_ann, 'elts') else "int64_t"
+                    for e_ann in []  # placeholder
+                ))
+                # Build field info from TUPLE_RET_MAP reverse lookup
+                _field_key = None
+                for _k, _v in TUPLE_RET_MAP.items():
+                    if _v == ret_struct:
+                        _field_key = _k
+                        break
+                has_array_field = _field_key and any("[" in ft for ft in _field_key)
+                if has_array_field and _field_key:
+                    # Emit field-by-field with memcpy for array fields
+                    self.emit(f"{ret_struct} _tret = {{0}};")
+                    for _fi, (_ft, _fnode) in enumerate(zip(_field_key, node.value.elts)):
+                        _fval = self.compile_expr(_fnode)
+                        if "[" in _ft:
+                            bracket = _ft.index("[")
+                            _size_str = _ft[bracket:]  # "[2]"
+                            _elem = _ft[:bracket]
+                            _size_n = _size_str.strip("[]")
+                            self.emit(f"memcpy(_tret.v{_fi}, {_fval}, {_size_n} * sizeof({_elem}));")
+                        else:
+                            self.emit(f"_tret.v{_fi} = {_fval};")
+                    if hasattr(self, 'defer_stack') and self.defer_stack:
+                        for call in reversed(self.defer_stack):
+                            self.emit(f"{call};")
+                    self.emit(f"return _tret;")
+                else:
+                    elts = [self.compile_expr(e) for e in node.value.elts]
+                    val = "{" + ", ".join(elts) + "}"
+                    if hasattr(self, 'defer_stack') and self.defer_stack:
+                        self.emit(f"/* deferred cleanup (early return) */")
+                        for call in reversed(self.defer_stack):
+                            self.emit(f"{call};")
+                    self.emit(f"return ({ret_struct}){val};")
             else:
                 if hasattr(self, 'defer_stack') and self.defer_stack:
                     # Capture return value before running cleanup
@@ -513,7 +651,7 @@ class StmtMixin:
             self.emit("return;")
 
     def _current_ret_type(self) -> str:
-        return "/* ret_type */"
+        return self.current_func_ret_type
 
     def compile_if(self, node: ast.If):
         cond = self.compile_expr(node.test)

@@ -1,3 +1,4 @@
+from micropy import *
 c_include("<dlfcn.h>")
 
 

@@ -1,15 +1,16 @@
+from micropy import *
 state: int = 0
 speed: float = 1.0
 
 
 @export
-def init(initial_state: int) -> void:
+def init(initial_state: int) -> void: # type: ignore
     state = initial_state
     speed = 1.0
 
 
 @export
-def update(dt: float) -> void:
+def update(dt: float) -> void: # type: ignore
     state += int(speed * dt * 100.0)
 
 

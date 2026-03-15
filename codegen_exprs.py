@@ -56,7 +56,17 @@ class ExprMixin:
                 if _method and _method in self.func_ret_types:
                     left = self.compile_expr(node.left)
                     right = self.compile_expr(node.right)
-                    return f"{_method}(&({left}), {right})"
+                    if left_type.endswith("*"):
+                        left_self = left
+                    else:
+                        # If left is not an lvalue (e.g. another Call/BinOp), spill to temp
+                        _left_is_lval = isinstance(node.left, (ast.Name, ast.Attribute, ast.Subscript))
+                        if not _left_is_lval:
+                            _tmp = f"_tmp_{left_base.lower()}_{id(node) & 0xFFFF:04x}"
+                            self.emit(f"{left_base} {_tmp} = {left};")
+                            left = _tmp
+                        left_self = f"&({left})"
+                    return f"{_method}({left_self}, {right})"
             left = self.compile_expr(node.left)
             right = self.compile_expr(node.right)
             if isinstance(node.op, ast.Pow):
@@ -74,7 +84,8 @@ class ExprMixin:
                 _method = f"{op_base}___neg__"
                 if op_base in self.structs and _method in self.func_ret_types:
                     operand = self.compile_expr(node.operand)
-                    return f"{_method}(&({operand}))"
+                    op_self = operand if op_type.endswith("*") else f"&({operand})"
+                    return f"{_method}({op_self})"
             operand = self.compile_expr(node.operand)
             if isinstance(node.op, ast.USub):
                 return f"(-{operand})"
@@ -292,6 +303,9 @@ class ExprMixin:
                         return f"({fname}){{{', '.join(parts)}}}"
                 if f"{fname}___init__" in self.func_ret_types:
                     return f"{fname}_new({arg_str})"
+                # No __init__: zero-init if no args, else designated init
+                if not arg_str:
+                    return f"({fname}){{0}}"
                 return f"({fname}){{{arg_str}}}"
 
             # Typed list constructors: IntList_new() etc.
@@ -368,9 +382,15 @@ class ExprMixin:
 
             # deref(p) → *p
             if fname == "deref":
+                if len(node.args) == 2:
+                    # deref(ptr, val) → *ptr = val  (write form)
+                    ptr_expr = self.compile_expr(node.args[0])
+                    val_expr = self.compile_expr(node.args[1])
+                    self.emit(f"*({ptr_expr}) = {val_expr};")
+                    return "(void)0"
                 return f"(*({arg_str}))"
 
-            # deref_set(p, val) → *p = val
+            # deref_set(p, val) → *p = val  (kept for back-compat)
             if fname == "deref_set":
                 ptr_expr = self.compile_expr(node.args[0])
                 val_expr = self.compile_expr(node.args[1])
@@ -654,6 +674,12 @@ class ExprMixin:
 
             base = obj_type.rstrip("*").strip()
             if obj_type.endswith("*") or base in self.structs:
+                # Check if attr is a funcptr field — call it as a function pointer
+                _struct_field_types = dict(self.structs.get(base, []))
+                if _struct_field_types.get(attr) == "__funcptr__":
+                    sep = "->" if obj_type.endswith("*") else "."
+                    return f"{obj_str}{sep}{attr}({arg_str})"
+
                 if base.startswith("Mp") and len(base) > 2:
                     prefix = "mp_" + base[2:].lower()
                 else:
@@ -662,12 +688,30 @@ class ExprMixin:
                 # If obj is an rvalue (Call, BinOp, …), spill to a temp so we
                 # can take its address — C does not allow &(rvalue).
                 if base in self.structs:
-                    _is_lval = isinstance(obj, (ast.Name, ast.Attribute, ast.Subscript))
-                    if not _is_lval:
-                        _tmp = f"_tmp_{base.lower()}_{id(node) & 0xFFFF:04x}"
-                        self.emit(f"{base} {_tmp} = {obj_str};")
-                        obj_str = _tmp
-                    self_arg = f"&({obj_str})"
+                    if obj_type.endswith("*"):
+                        # Already a pointer — pass directly, no & needed
+                        self_arg = obj_str
+                    else:
+                        _is_lval = isinstance(obj, (ast.Name, ast.Attribute, ast.Subscript))
+                        if not _is_lval:
+                            _tmp = f"_tmp_{base.lower()}_{id(node) & 0xFFFF:04x}"
+                            self.emit(f"{base} {_tmp} = {obj_str};")
+                            obj_str = _tmp
+                        self_arg = f"&({obj_str})"
+                    # Auto-deref args: if a T* is passed where T is expected, emit (*arg)
+                    _cfunc = f"{prefix}_{attr}"
+                    _ptypes = self.func_param_types.get(_cfunc, [])
+                    if _ptypes and node.args:
+                        _coerced = []
+                        for _i, (_aexpr, _anode) in enumerate(zip(args, node.args)):
+                            _pidx = _i + 1  # skip self param
+                            if _pidx < len(_ptypes):
+                                _exp = _ptypes[_pidx]
+                                _inf = self.infer_type(_anode)
+                                if _inf.endswith("*") and _exp == _inf[:-1].strip():
+                                    _aexpr = f"(*({_aexpr}))"
+                            _coerced.append(_aexpr)
+                        arg_str = ", ".join(_coerced)
                 else:
                     self_arg = obj_str
                 all_args = f"{self_arg}, {arg_str}" if arg_str else self_arg

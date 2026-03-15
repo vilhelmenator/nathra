@@ -6,7 +6,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
-from type_map import TYPE_MAP, ALIAS_MAP, map_type, mangle_type, get_array_info, get_typed_list_elem, gen_typed_list, get_funcptr_info
+from type_map import TYPE_MAP, ALIAS_MAP, TUPLE_RET_MAP, map_type, mangle_type, get_array_info, get_typed_list_elem, gen_typed_list, get_funcptr_info
 import type_map as _type_map_mod
 from codegen_stmts import StmtMixin
 from codegen_exprs import ExprMixin
@@ -77,11 +77,15 @@ class Compiler(StmtMixin, ExprMixin):
     mutable_globals: dict = field(default_factory=dict)  # name → ctype for top-level vars
     func_defaults: dict = field(default_factory=dict)    # fname → [ast_node|None, ...] per param
     func_param_order: dict = field(default_factory=dict) # fname → [param_name, ...] in declared order
+    func_param_types: dict = field(default_factory=dict)  # fname → [ctype, ...] for all params (incl. self)
+    struct_array_fields: dict = field(default_factory=dict)  # (struct_name, field_name) → elem_ctype
+    funcptr_alias_infos: dict = field(default_factory=dict)  # alias_name → (ret_ctype, [arg_ctypes])
     type_aliases: dict = field(default_factory=dict)     # alias_name → resolved ctype
     result_types: dict = field(default_factory=dict)     # "Result_T" → inner_ctype
     _export_funcs: list = field(default_factory=list)    # (name, ret, [(arg,type)]) for @export
     struct_properties: dict = field(default_factory=dict) # struct_name → {prop_name → ret_type}
     _lambda_counter: int = 0
+    emit_line_directives: bool = True  # set False with --no-line-directives
     _lambda_table: dict = field(default_factory=dict)  # id(ast.Lambda) → name
 
     def emit(self, line=""):
@@ -163,6 +167,17 @@ class Compiler(StmtMixin, ExprMixin):
         if isinstance(node, ast.BinOp):
             lt = self.infer_type(node.left)
             rt = self.infer_type(node.right)
+            lb = lt.rstrip("*").strip()
+            if lb in self.structs:
+                _op_map = {
+                    ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__",
+                    ast.Div: "__truediv__", ast.Mod: "__mod__",
+                }
+                _op_name = _op_map.get(type(node.op))
+                if _op_name:
+                    _method = f"{lb}_{_op_name}"
+                    if _method in self.func_ret_types:
+                        return self.func_ret_types[_method]
             if lt == "double" or rt == "double":
                 return "double"
             return "int64_t"
@@ -183,17 +198,42 @@ class Compiler(StmtMixin, ExprMixin):
 
         if isinstance(node, ast.Attribute):
             obj_type = self.infer_type(node.value)
-            if obj_type in self.structs:
-                for fname, ftype in self.structs[obj_type]:
+            base = obj_type.rstrip("*").strip()
+            if base in self.structs:
+                for fname, ftype in self.structs[base]:
                     if fname == node.attr:
+                        if ftype == "__array__":
+                            # Return elem type for array fields
+                            et = self.struct_array_fields.get((base, node.attr))
+                            return et if et else "int64_t"
                         return ftype
             return "int64_t"
 
         if isinstance(node, ast.Subscript):
             if isinstance(node.value, ast.Name):
-                et = self._list_vars.get(node.value.id)
+                vname = node.value.id
+                # Named array variable
+                arr_info = self._array_vars.get(vname)
+                if arr_info:
+                    return arr_info[0]  # elem_type
+                et = self._list_vars.get(vname)
                 if et:
                     return et
+            # Attribute subscript: s.field[i] where field is an array or ptr[T]
+            if isinstance(node.value, ast.Attribute):
+                obj_type = self.infer_type(node.value.value)
+                base = obj_type.rstrip("*").strip()
+                et = self.struct_array_fields.get((base, node.value.attr))
+                if et:
+                    return et
+                # ptr[T] field: T* → T
+                for _fn, _ft in self.structs.get(base, []):
+                    if _fn == node.value.attr and _ft.endswith("*"):
+                        return _ft[:-1].strip()
+            # Plain pointer subscript: T*[i] → T
+            val_type = self.infer_type(node.value)
+            if val_type.endswith("*"):
+                return val_type[:-1].strip()
             return "int64_t"
 
         if isinstance(node, ast.IfExp):
@@ -373,8 +413,9 @@ class Compiler(StmtMixin, ExprMixin):
         self.from_imports = {}
         self.local_vars = {}
         self.func_args = {}
-        # Clear module-level alias map for this compile run
+        # Clear module-level alias maps for this compile run
         _type_map_mod.ALIAS_MAP.clear()
+        _type_map_mod.TUPLE_RET_MAP.clear()
 
         # Preprocess: struct/union keywords → class (with @union decorator for unions)
         source = source.replace("\nstruct ", "\nclass ")
@@ -531,7 +572,11 @@ class Compiler(StmtMixin, ExprMixin):
                     fields = []
                     for item in node.body:
                         if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                            fields.append((item.target.id, map_type(item.annotation)))
+                            _ctype = map_type(item.annotation)
+                            fields.append((item.target.id, _ctype))
+                            if _ctype == "__array__":
+                                _et, _ = get_array_info(item.annotation)
+                                self.struct_array_fields[(node.name, item.target.id)] = _et
                     mod_info.structs[node.name] = fields
                     self.structs[node.name] = fields
 
@@ -606,6 +651,10 @@ class Compiler(StmtMixin, ExprMixin):
                         if resolved != alias_name:  # avoid trivial self-aliases
                             self.type_aliases[alias_name] = resolved
                             _type_map_mod.ALIAS_MAP[alias_name] = resolved
+                            if resolved == "__funcptr__":
+                                fp_info = get_funcptr_info(val)
+                                if fp_info:
+                                    self.funcptr_alias_infos[alias_name] = fp_info
 
             # Python 3.12+ `type MyInt = int` statement
             elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
@@ -619,6 +668,7 @@ class Compiler(StmtMixin, ExprMixin):
         # Scan entire tree for typed_list / Result annotations
         self._scan_typed_lists(tree)
         self._scan_result_types(tree)
+        self._scan_tuple_returns(tree)
 
         # ---- Process imports ----
         for node in ast.iter_child_nodes(tree):
@@ -662,31 +712,11 @@ class Compiler(StmtMixin, ExprMixin):
         if self.result_types:
             self._emit_result_types()
 
-        # Forward-declare all structs/unions so types can reference each other
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef) and node.name in self.structs:
-                decs = self.get_decorators(node)
-                kw = "union" if "union" in decs else "struct"
-                self.emit(f"typedef {kw} {node.name} {node.name};")
-        if self.structs:
-            self.emit("")
+        # Emit tuple return structs
+        if TUPLE_RET_MAP:
+            self._emit_tuple_ret_structs()
 
-        # Emit structs
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef) and node.name in self.structs:
-                self.compile_struct(node)
-
-        # Emit struct-element typed list implementations (after structs are defined)
-        for elem_t, list_name in self.typed_lists.items():
-            if elem_t in self.structs:
-                self.emit(gen_typed_list(elem_t, list_name))
-
-        # Verify trait implementations
-        for sname, trait_names in self.trait_impls.items():
-            for tname in trait_names:
-                self._verify_trait(sname, tname, tree)
-
-        # Emit constants
+        # Emit constants — before structs so struct methods can reference them
         for name, ctype, value_node in mod_info.constants:
             if value_node:
                 val = self.compile_expr(value_node)
@@ -694,7 +724,7 @@ class Compiler(StmtMixin, ExprMixin):
         if mod_info.constants:
             self.emit("")
 
-        # Emit mutable globals
+        # Emit mutable globals — before structs for same reason
         for name, ctype, annotation, value_node in mod_info.globals:
             if ctype == "__array__":
                 elem_type, size = get_array_info(annotation)
@@ -729,7 +759,17 @@ class Compiler(StmtMixin, ExprMixin):
                 if "compile_time" in decs:
                     self._emit_compile_time(node, tree)
 
-        # Emit function prototypes (forward declarations) for mutual recursion support
+        # Forward-declare all structs/unions so function prototypes can reference them
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name in self.structs:
+                decs = self.get_decorators(node)
+                kw = "union" if "union" in decs else "struct"
+                self.emit(f"typedef {kw} {node.name} {node.name};")
+        if self.structs:
+            self.emit("")
+
+        # Emit function prototypes (forward declarations) — before structs so struct
+        # methods can call free functions defined later in the file
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
                 decs = self.get_decorators(node)
@@ -744,6 +784,21 @@ class Compiler(StmtMixin, ExprMixin):
                 if proto:
                     self.emit(f"{proto};")
         self.emit("")
+
+        # Emit structs
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name in self.structs:
+                self.compile_struct(node)
+
+        # Emit struct-element typed list implementations (after structs are defined)
+        for elem_t, list_name in self.typed_lists.items():
+            if elem_t in self.structs:
+                self.emit(gen_typed_list(elem_t, list_name))
+
+        # Verify trait implementations
+        for sname, trait_names in self.trait_impls.items():
+            for tname in trait_names:
+                self._verify_trait(sname, tname, tree)
 
         # Emit functions
         for node in ast.iter_child_nodes(tree):
@@ -955,6 +1010,37 @@ class Compiler(StmtMixin, ExprMixin):
             self.emit(f"static inline {inner} {result_name}_unwrap({result_name} r) "
                       f'{{ if (!r._ok) {{ fprintf(stderr, "unwrap: %s\\n", r._err); abort(); }} '
                       f"return r._val; }}")
+            self.emit("")
+
+    def _scan_tuple_returns(self, tree):
+        """Scan for functions with tuple return types and populate TUPLE_RET_MAP."""
+        import type_map as _tm
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.returns:
+                if isinstance(node.returns, ast.Tuple):
+                    # map_type will register the struct name in TUPLE_RET_MAP
+                    map_type(node.returns)
+
+    def _emit_tuple_ret_structs(self):
+        """Emit C structs for all tuple return types found during scan."""
+        import type_map as _tm
+        for key, struct_name in _tm.TUPLE_RET_MAP.items():
+            self.emit(f"typedef struct {{")
+            self.indent += 1
+            for i, ctype in enumerate(key):
+                if ctype == "__array__":
+                    # Shouldn't normally reach here; arrays handled per-field below
+                    self.emit(f"void* v{i};")
+                elif "[" in ctype:
+                    # e.g. "double[2]" — parse as elem_type[N]
+                    bracket = ctype.index("[")
+                    elem = ctype[:bracket]
+                    rest = ctype[bracket:]  # "[2]" etc
+                    self.emit(f"{elem} v{i}{rest};")
+                else:
+                    self.emit(f"{ctype} v{i};")
+            self.indent -= 1
+            self.emit(f"}} {struct_name};")
             self.emit("")
 
     def _scan_typed_lists(self, tree):
@@ -1290,6 +1376,7 @@ class Compiler(StmtMixin, ExprMixin):
         "math", "sys", "os", "os.path", "time", "random", "re",
         "json", "collections", "itertools", "functools", "typing",
         "io", "pathlib", "struct", "array", "ctypes",
+        "micropy",  # stub-only import for IDE type checking; not compiled
     })
 
     def compile_import(self, node: ast.Import):
@@ -1353,6 +1440,9 @@ class Compiler(StmtMixin, ExprMixin):
             atype = map_type(arg.annotation)
             if atype == "__funcptr__":
                 info = _gfp(arg.annotation)
+                # If annotation is a Name alias, resolve via funcptr_alias_infos
+                if info is None and isinstance(arg.annotation, ast.Name):
+                    info = self.funcptr_alias_infos.get(arg.annotation.id)
                 if info:
                     r, fp_args = info
                     fp_arg_str = ", ".join(fp_args) if fp_args else "void"

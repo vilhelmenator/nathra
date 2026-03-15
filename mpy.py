@@ -37,7 +37,11 @@ def build_once(args, source_dir) -> bool:
     if not os.path.exists(rt_path) or os.path.getmtime(src_rt) > os.path.getmtime(rt_path):
         shutil.copy2(src_rt, rt_path)
 
-    compiler = Compiler(source_dir=source_dir, platform=args.platform)
+    compiler = Compiler(
+        source_dir=source_dir,
+        platform=args.platform,
+        emit_line_directives=not getattr(args, 'no_line_directives', False),
+    )
     try:
         c_src, h_src, mod_info = compiler.compile_file(args.source, "__main__")
     except CompileError as e:
@@ -132,6 +136,8 @@ def main():
     parser.add_argument("--flags", default="",
                         metavar="FLAGS",
                         help='Extra flags passed to the C compiler/linker, quoted: --flags="-O2 -lssl"')
+    parser.add_argument("--no-line-directives", action="store_true",
+                        help="Omit #line directives from emitted C (cleaner output for diffing)")
     args = parser.parse_args()
 
     # Route build.mpy to the build system

@@ -8,6 +8,10 @@ import ast
 # Cleared at the start of each compile_file() call.
 ALIAS_MAP: dict = {}
 
+# Tuple return type names: populated by compiler, cleared per compile_file().
+# Maps (ctype, ...) tuple key → struct_name string.
+TUPLE_RET_MAP: dict = {}
+
 TYPE_MAP = {
     "int": "int64_t",
     "float": "double",
@@ -38,6 +42,21 @@ TYPE_MAP = {
     "u32": "uint32_t",
     "u64": "uint64_t",
 }
+
+
+def _tuple_field_type(annotation, type_map=None) -> str:
+    """Like map_type but encodes array[T, N] as 'T[N]' for tuple struct fields."""
+    if type_map is None:
+        type_map = TYPE_MAP
+    if isinstance(annotation, ast.Subscript):
+        base = annotation.value
+        if isinstance(base, ast.Name) and base.id == "array":
+            sl = annotation.slice
+            if isinstance(sl, ast.Tuple) and len(sl.elts) == 2:
+                elem = map_type(sl.elts[0], type_map)
+                size = sl.elts[1].value if isinstance(sl.elts[1], ast.Constant) else 0
+                return f"{elem}[{size}]"
+    return map_type(annotation, type_map)
 
 
 def map_type(annotation, type_map=None) -> str:
@@ -88,6 +107,16 @@ def map_type(annotation, type_map=None) -> str:
             if base.id == "Result":
                 inner = map_type(annotation.slice, type_map)
                 return f"Result_{mangle_type(inner)}"
+    if isinstance(annotation, ast.Tuple):
+        # Tuple return type — look up in TUPLE_RET_MAP
+        key = tuple(_tuple_field_type(e, type_map) for e in annotation.elts)
+        if key in TUPLE_RET_MAP:
+            return TUPLE_RET_MAP[key]
+        # Generate a name and register it
+        parts = [k.replace("*", "Ptr").replace(" ", "_").replace("[", "_").replace("]", "") for k in key]
+        name = "_TupleRet_" + "_".join(parts)
+        TUPLE_RET_MAP[key] = name
+        return name
     return "int64_t"
 
 
