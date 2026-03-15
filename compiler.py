@@ -190,6 +190,11 @@ class Compiler(StmtMixin, ExprMixin):
             return "int64_t"
 
         if isinstance(node, ast.Subscript):
+            val_type = self.infer_type(node.value)
+            if val_type == "MpList*" and isinstance(node.value, ast.Name):
+                et = self._list_vars.get(node.value.id)
+                if et:
+                    return et
             return "int64_t"
 
         if isinstance(node, ast.IfExp):

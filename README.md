@@ -271,16 +271,43 @@ match status:
     case _:   print("other")
 ```
 
+### Lists
+
+`list[T]` gives you a typed, resizable list with Python-style methods:
+
+```python
+nums: list[int] = list_new()
+nums.append(10)
+nums.append(20)
+nums.append(30)
+
+print(len(nums))    # 3
+print(nums[0])      # 10
+nums[1] = 99        # set by index
+v: int = nums.pop() # removes and returns last element
+```
+
+Float and string element types work the same way:
+
+```python
+fs: list[float] = list_new()
+fs.append(1.5)
+fs.append(2.5)
+print(fs[0])   # 1.5
+```
+
+Methods: `append(x)`, `pop()`, `len()`. Subscript read (`lst[i]`) and write (`lst[i] = x`) auto-box/unbox based on the declared element type.
+
 ### List comprehensions
 
 ```python
-squares: list = [i * i for i in range(10)]
-doubled: list = [x * 2 for x in my_array]
-evens:   list = [x for x in my_array if x % 2 == 0]
-pos_sq:  list = [x * x for x in vals if x > 0]
+squares: list[int] = [i * i for i in range(10)]
+doubled: list[int] = [x * 2 for x in my_array]
+evens:   list[int] = [x for x in my_array if x % 2 == 0]
+pos_sq:  list[int] = [x * x for x in vals if x > 0]
 ```
 
-Works with `range(...)`, `array[T, N]`, and typed lists. Elements are stored as `MpVal`; retrieve with `as_int(list_get(lst, i))` or `as_float(...)`.
+Works with `range(...)`, `array[T, N]`, and typed lists. Use `list[T]` annotation for typed access via `lst[i]`; or plain `list` with `as_int(list_get(lst, i))` / `as_float(...)`.
 
 ### Strings
 
@@ -355,7 +382,35 @@ if path is not None:
     print(path)
 ```
 
-### Memory and pointers
+### Memory management
+
+micropy has no garbage collector. Heap-allocated types — `str`, `list[T]`, `dict` — are owned by you and must be freed explicitly.
+
+**`defer`** — runs a cleanup call at the end of the enclosing function, in reverse order, even on early return. This is the idiomatic way to pair allocation with cleanup:
+
+```python
+def process() -> void:
+    nums: list[int] = list_new()
+    defer(list_free(nums))          # freed when process() returns
+
+    s: str = str_new("hello")
+    defer(str_free(s))              # freed after nums (reverse order)
+
+    # ... use nums and s freely
+```
+
+Free functions: `list_free(l)`, `str_free(s)`, `dict_free(d)`.
+
+**Arenas** — allocate many objects from a single region; free everything at once when the scope exits. Good for temporary work where individual lifetimes don't matter:
+
+```python
+with arena_new() as a:
+    lst: list = arena_list_new(a)
+    s:   str  = arena_str_new(a, "scratch")
+    # a and all its allocations freed here automatically
+```
+
+**Raw pointers** — `alloc`/`free` for manual byte-level control:
 
 ```python
 buf: ptr[byte] = alloc(1024)
@@ -363,11 +418,9 @@ free(buf)
 
 p: ptr[int] = addr_of(x)
 v: int = deref(p)
-
-with arena_new() as a:
-    lst: list = arena_list_new(a)
-    # arena freed automatically at end of block
 ```
+
+**Stack types never need freeing** — `array[T, N]`, structs, and all scalar types live on the stack.
 
 ### SIMD
 

@@ -131,6 +131,19 @@ class ExprMixin:
             return self.compile_call(node)
 
         if isinstance(node, ast.Subscript):
+            if self.infer_type(node.value) == "MpList*":
+                lst = self.compile_expr(node.value)
+                idx = self.compile_expr(node.slice)
+                raw = f"mp_list_get({lst}, {idx})"
+                if isinstance(node.value, ast.Name):
+                    et = self._list_vars.get(node.value.id)
+                    if et == "double":
+                        return f"mp_as_float({raw})"
+                    elif et == "MpStr*":
+                        return f"(MpStr*)(uintptr_t)mp_as_int({raw})"
+                    elif et:
+                        return f"(({et})mp_as_int({raw}))"
+                return raw
             val = self.compile_expr(node.value)
             sl = self.compile_expr(node.slice)
             return f"{val}[{sl}]"
@@ -597,6 +610,27 @@ class ExprMixin:
             obj_str = self.compile_expr(obj)
             # Resolve TypeName_method via type inference
             obj_type = self.infer_type(obj)
+
+            # MpList* method dispatch with auto-boxing/unboxing
+            if obj_type == "MpList*":
+                def _box(a_node):
+                    e = self.compile_expr(a_node)
+                    t = self.infer_type(a_node)
+                    if t == "double": return f"mp_val_float({e})"
+                    if t == "MpStr*": return f"mp_val_str({e})"
+                    return f"mp_val_int((int64_t)({e}))"
+                elem_type = self._list_vars.get(obj.id) if isinstance(obj, ast.Name) else None
+                if attr == "append" and len(node.args) == 1:
+                    return f"mp_list_append({obj_str}, {_box(node.args[0])})"
+                if attr == "pop" and not node.args:
+                    raw = f"mp_list_pop({obj_str})"
+                    if elem_type == "double": return f"mp_as_float({raw})"
+                    if elem_type == "MpStr*": return f"(MpStr*)(uintptr_t)mp_as_int({raw})"
+                    if elem_type: return f"(({elem_type})mp_as_int({raw}))"
+                    return raw
+                if attr == "len" and not node.args:
+                    return f"mp_list_len({obj_str})"
+
             base = obj_type.rstrip("*").strip()
             if obj_type.endswith("*") or base in self.structs:
                 if base.startswith("Mp") and len(base) > 2:

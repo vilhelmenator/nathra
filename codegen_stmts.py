@@ -449,10 +449,22 @@ class StmtMixin:
             else:
                 self.emit(f"/* unpack */ __auto_type _mp_unpack = {val};")
             return
-        val = self.compile_expr(node.value)
+        val_node = node.value
         for target in node.targets:
-            tgt = self.compile_expr(target)
-            self.emit(f"{tgt} = {val};")
+            # lst[i] = x on a MpList* → mp_list_set with auto-boxing
+            if isinstance(target, ast.Subscript) and self.infer_type(target.value) == "MpList*":
+                lst = self.compile_expr(target.value)
+                idx = self.compile_expr(target.slice)
+                v = self.compile_expr(val_node)
+                vt = self.infer_type(val_node)
+                if vt == "double":   boxed = f"mp_val_float({v})"
+                elif vt == "MpStr*": boxed = f"mp_val_str({v})"
+                else:                boxed = f"mp_val_int((int64_t)({v}))"
+                self.emit(f"mp_list_set({lst}, {idx}, {boxed});")
+            else:
+                val = self.compile_expr(val_node)
+                tgt = self.compile_expr(target)
+                self.emit(f"{tgt} = {val};")
 
     def compile_aug_assign(self, node: ast.AugAssign):
         tgt = self.compile_expr(node.target)

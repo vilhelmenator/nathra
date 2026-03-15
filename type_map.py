@@ -62,7 +62,7 @@ def map_type(annotation, type_map=None) -> str:
         if isinstance(base, ast.Name):
             if base.id == "array":
                 return "__array__"
-            if base.id == "typed_list":
+            if base.id in ("typed_list", "list"):
                 return "__typed_list__"
             if base.id == "ptr":
                 inner = map_type(annotation.slice, type_map)
