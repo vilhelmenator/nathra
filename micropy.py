@@ -169,8 +169,9 @@ def rand_float() -> float: ...
 # ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------
-def time_now() -> int: ...
-def time_ms() -> int: ...
+import time as _time
+def time_now() -> int: return int(_time.time())
+def time_ms() -> int:  return int(_time.time() * 1000)
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -233,7 +234,14 @@ def test_assert(cond: bool, msg: str = "") -> None: ...
 # ---------------------------------------------------------------------------
 # Common C stdlib functions (used directly in micropy)
 # ---------------------------------------------------------------------------
-def printf(fmt: str, *args: Any) -> int: ...
+def printf(fmt: str, *args: Any) -> int:
+    import sys, re
+    # Normalise C-specific length modifiers (%lld → %d, %zu → %d, etc.)
+    py_fmt = re.sub(r'%([-+0-9.*]*)(?:ll|l|z|h|hh)([diouxX])', r'%\1\2', fmt)
+    try:    out = py_fmt % args
+    except: out = fmt
+    sys.stdout.write(out)
+    return len(out)
 def fprintf(stream: Any, fmt: str, *args: Any) -> int: ...
 def sprintf(buf: Any, fmt: str, *args: Any) -> int: ...
 def snprintf(buf: Any, n: int, fmt: str, *args: Any) -> int: ...

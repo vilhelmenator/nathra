@@ -11,6 +11,15 @@ tests/test_*
 test_*
 !test_*.mpy
 
+# Benchmark artifacts
+bench/bench
+bench/*.c
+bench/*.h
+bench/*.dSYM/
+
+# macOS debug symbol bundles
+*.dSYM/
+
 # Shared libraries and binaries
 *.so
 *.dylib
