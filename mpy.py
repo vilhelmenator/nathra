@@ -11,12 +11,15 @@ Usage:
     python mpy.py program.mpy --shared         # compile to shared library (.so/.dylib/.dll)
     python mpy.py program.mpy --platform linux # target platform
     python mpy.py program.mpy --watch          # rebuild on source change
+    python mpy.py program.mpy --flags="-O2 -march=native"  # extra compiler/linker flags
+    python mpy.py program.mpy --flags="-lssl -lz"          # link extra libraries
     python mpy.py build.mpy                    # run project build script
 """
 
 import sys
 import os
 import subprocess
+import shlex
 import argparse
 import time
 
@@ -75,15 +78,16 @@ def build_once(args, source_dir) -> bool:
         out_name += ".exe"
 
     is_msvc = args.cc in ("cl", "cl.exe")
+    extra_flags = shlex.split(getattr(args, 'flags', '') or '')
     if getattr(args, 'shared', False):
         if is_msvc:
-            cmd = [args.cc] + c_files + [f"/Fe{out_name}", "/nologo", "/LD"]
+            cmd = [args.cc] + c_files + [f"/Fe{out_name}", "/nologo", "/LD"] + extra_flags
         else:
-            cmd = [args.cc, "-shared", "-fPIC"] + c_files + ["-o", out_name, "-lm"]
+            cmd = [args.cc, "-shared", "-fPIC"] + c_files + ["-o", out_name, "-lm"] + extra_flags
     elif is_msvc:
-        cmd = [args.cc] + c_files + [f"/Fe{out_name}", "/nologo"]
+        cmd = [args.cc] + c_files + [f"/Fe{out_name}", "/nologo"] + extra_flags
     else:
-        cmd = [args.cc] + c_files + ["-o", out_name, "-lm"]
+        cmd = [args.cc] + c_files + ["-o", out_name, "-lm"] + extra_flags
     print(f"Running: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -125,6 +129,9 @@ def main():
                         help="Target platform for @platform decorators")
     parser.add_argument("--watch", action="store_true",
                         help="Watch source file and rebuild on change")
+    parser.add_argument("--flags", default="",
+                        metavar="FLAGS",
+                        help='Extra flags passed to the C compiler/linker, quoted: --flags="-O2 -lssl"')
     args = parser.parse_args()
 
     # Route build.mpy to the build system

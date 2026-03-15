@@ -23,12 +23,14 @@ def main() -> void:
 ## Quick start
 
 ```sh
-python3 mpy.py program.mpy           # compile + link
-python3 mpy.py program.mpy --run     # compile, link, run
-python3 mpy.py program.mpy --emit-c  # emit C only
-python3 mpy.py program.mpy --shared  # compile to shared library (.so/.dylib/.dll)
-python3 mpy.py build.mpy             # run a project build script
-python3 mpy.py program.mpy --watch   # rebuild on save
+python3 mpy.py program.mpy                        # compile + link
+python3 mpy.py program.mpy --run                  # compile, link, run
+python3 mpy.py program.mpy --emit-c               # emit C only
+python3 mpy.py program.mpy --shared               # compile to shared library (.so/.dylib/.dll)
+python3 mpy.py build.mpy                          # run a project build script
+python3 mpy.py program.mpy --watch                # rebuild on save
+python3 mpy.py program.mpy --flags="-O2 -march=native"   # extra compiler/linker flags
+python3 mpy.py program.mpy --flags="-lssl -lz"           # link extra libraries
 ```
 
 ## Language reference
