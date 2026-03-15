@@ -516,13 +516,17 @@ class StmtMixin:
                     temps.append((tmp, t))
                 for tgt_node, (tmp, t) in zip(elts, temps):
                     tgt = self.compile_expr(tgt_node)
-                    already_declared = (tgt in self.local_vars or tgt in self.func_args
-                                        or tgt in self._array_vars)
-                    if already_declared:
-                        self.emit(f"{tgt} = {tmp};")
+                    if isinstance(tgt_node, ast.Name):
+                        already_declared = (tgt in self.local_vars or tgt in self.func_args
+                                            or tgt in self._array_vars)
+                        if already_declared:
+                            self.emit(f"{tgt} = {tmp};")
+                        else:
+                            self.local_vars[tgt] = t
+                            self.emit(f"{t} {tgt} = {tmp};")
                     else:
-                        self.local_vars[tgt] = t
-                        self.emit(f"{t} {tgt} = {tmp};")
+                        # Subscript or attribute target — always an assignment
+                        self.emit(f"{tgt} = {tmp};")
                 return
             # RHS is a struct-returning call — unpack by field position
             ret_type = self.infer_type(node.value)
