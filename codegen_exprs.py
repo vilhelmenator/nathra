@@ -658,8 +658,18 @@ class ExprMixin:
                     prefix = "mp_" + base[2:].lower()
                 else:
                     prefix = base
-                # Value-type structs: pass &obj as self (pointer self)
-                self_arg = f"&({obj_str})" if base in self.structs else obj_str
+                # Value-type structs: pass &obj as self (pointer self).
+                # If obj is an rvalue (Call, BinOp, …), spill to a temp so we
+                # can take its address — C does not allow &(rvalue).
+                if base in self.structs:
+                    _is_lval = isinstance(obj, (ast.Name, ast.Attribute, ast.Subscript))
+                    if not _is_lval:
+                        _tmp = f"_tmp_{base.lower()}_{id(node) & 0xFFFF:04x}"
+                        self.emit(f"{base} {_tmp} = {obj_str};")
+                        obj_str = _tmp
+                    self_arg = f"&({obj_str})"
+                else:
+                    self_arg = obj_str
                 all_args = f"{self_arg}, {arg_str}" if arg_str else self_arg
                 return f"{prefix}_{attr}({all_args})"
             all_args = f"{obj_str}, {arg_str}" if arg_str else obj_str
