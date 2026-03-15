@@ -92,7 +92,7 @@ def map_type(annotation, type_map=None) -> str:
                 return "__funcptr__"
             if base.id == "vec":
                 return "__vec__"
-            if base.id == "volatile":
+            if base.id in ("volatile", "atomic"):
                 inner = map_type(annotation.slice, type_map)
                 return f"volatile {inner}"
             if base.id == "thread_local":

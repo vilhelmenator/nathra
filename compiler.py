@@ -327,7 +327,9 @@ class Compiler(StmtMixin, ExprMixin):
                 "channel_recv": "int",
                 "channel_recv_val": "MpVal", "channel_drain": "MpList*",
                 "channel_has_data": "int",
-                "atomic_add": "int64_t", "atomic_load": "int64_t",
+                "atomic_add": "int64_t", "atomic_sub": "int64_t",
+                "atomic_load": "int64_t", "atomic_store": "void",
+                "atomic_cas": "int64_t",
                 "pool_new": "MpThreadPool*",
             }
             if fname in rt_types:

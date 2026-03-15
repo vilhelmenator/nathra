@@ -335,11 +335,17 @@ static inline void mp_sleep_ms(int64_t ms) { Sleep((DWORD)ms); }
 static inline int64_t mp_atomic_add(volatile int64_t* ptr, int64_t val) {
     return InterlockedExchangeAdd64(ptr, val);
 }
+static inline int64_t mp_atomic_sub(volatile int64_t* ptr, int64_t val) {
+    return InterlockedExchangeAdd64(ptr, -val);
+}
 static inline int64_t mp_atomic_load(volatile int64_t* ptr) {
     return InterlockedCompareExchange64(ptr, 0, 0);
 }
 static inline void mp_atomic_store(volatile int64_t* ptr, int64_t val) {
     InterlockedExchange64(ptr, val);
+}
+static inline int64_t mp_atomic_cas(volatile int64_t* ptr, int64_t expected, int64_t desired) {
+    return InterlockedCompareExchange64(ptr, desired, expected);
 }
 
 #else /* POSIX */
@@ -391,11 +397,17 @@ static inline void mp_sleep_ms(int64_t ms) { usleep(ms * 1000); }
 static inline int64_t mp_atomic_add(volatile int64_t* ptr, int64_t val) {
     return __sync_fetch_and_add(ptr, val);
 }
+static inline int64_t mp_atomic_sub(volatile int64_t* ptr, int64_t val) {
+    return __sync_fetch_and_sub(ptr, val);
+}
 static inline int64_t mp_atomic_load(volatile int64_t* ptr) {
     return __sync_val_compare_and_swap(ptr, 0, 0);
 }
 static inline void mp_atomic_store(volatile int64_t* ptr, int64_t val) {
     __sync_lock_test_and_set(ptr, val);
+}
+static inline int64_t mp_atomic_cas(volatile int64_t* ptr, int64_t expected, int64_t desired) {
+    return __sync_val_compare_and_swap(ptr, expected, desired);
 }
 
 #endif /* _WIN32 / POSIX */
