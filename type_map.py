@@ -65,6 +65,8 @@ def map_type(annotation, type_map=None) -> str:
     if annotation is None:
         return "void"
     if isinstance(annotation, ast.Constant):
+        if annotation.value is None:
+            return "void"
         return str(annotation.value)
     if isinstance(annotation, ast.Name):
         # Check user-defined type aliases first
