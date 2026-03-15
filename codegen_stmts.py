@@ -505,12 +505,24 @@ class StmtMixin:
             elts = node.targets[0].elts
             # RHS is a tuple literal — emit individual assignments
             if isinstance(node.value, ast.Tuple) and len(node.value.elts) == len(elts):
-                for tgt_node, val_node in zip(elts, node.value.elts):
-                    tgt = self.compile_expr(tgt_node)
-                    val = self.compile_expr(val_node)
+                # Evaluate all RHS values first into temps, then assign to LHS.
+                # This correctly handles swaps like a, b = b, a.
+                temps = []
+                for i, val_node in enumerate(node.value.elts):
                     t = self.infer_type(val_node)
-                    self.local_vars[tgt] = t
-                    self.emit(f"{t} {tgt} = {val};")
+                    tmp = f"_mp_swap_{i}_{id(node) & 0xFFFF:04x}"
+                    val = self.compile_expr(val_node)
+                    self.emit(f"{t} {tmp} = {val};")
+                    temps.append((tmp, t))
+                for tgt_node, (tmp, t) in zip(elts, temps):
+                    tgt = self.compile_expr(tgt_node)
+                    already_declared = (tgt in self.local_vars or tgt in self.func_args
+                                        or tgt in self._array_vars)
+                    if already_declared:
+                        self.emit(f"{tgt} = {tmp};")
+                    else:
+                        self.local_vars[tgt] = t
+                        self.emit(f"{t} {tgt} = {tmp};")
                 return
             # RHS is a struct-returning call — unpack by field position
             ret_type = self.infer_type(node.value)
@@ -590,12 +602,40 @@ class StmtMixin:
                     else:                boxed = f"mp_val_int((int64_t)({v}))"
                     self.emit(f"mp_list_set({lst}, {idx}, {boxed});")
                     continue
+            # Array literal assigned to an existing array variable: emit element-by-element
+            if isinstance(val_node, ast.List) and isinstance(target, ast.Name):
+                arr_info = self._array_vars.get(target.id)
+                if arr_info:
+                    tgt = target.id
+                    for i, elt in enumerate(val_node.elts):
+                        elt_val = self.compile_expr(elt)
+                        self.emit(f"{tgt}[{i}] = {elt_val};")
+                    continue
             val = self.compile_expr(val_node)
             tgt = self.compile_expr(target)
             val = self._coerce(val, self.infer_type(val_node), self._dest_type(target))
             self.emit(f"{tgt} = {val};")
 
     def compile_aug_assign(self, node: ast.AugAssign):
+        tgt_type = self.infer_type(node.target)
+        tgt_base = tgt_type.rstrip("*").strip()
+        # Struct operator overload: expand a += b  →  a = a.__iadd__(b) → a = a + b
+        if tgt_base in self.structs:
+            _iop_map = {
+                ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__",
+                ast.Div: "__truediv__", ast.Mod: "__mod__",
+            }
+            _op_name = _iop_map.get(type(node.op))
+            _method = f"{tgt_base}_{_op_name}" if _op_name else None
+            if _method and _method in self.func_ret_types:
+                tgt = self.compile_expr(node.target)
+                rhs = self.compile_expr(node.value)
+                if tgt_type.endswith("*"):
+                    self_arg = tgt
+                else:
+                    self_arg = f"&({tgt})"
+                self.emit(f"{tgt} = {_method}({self_arg}, {rhs});")
+                return
         tgt = self.compile_expr(node.target)
         val = self.compile_expr(node.value)
         op = self.compile_op(node.op)

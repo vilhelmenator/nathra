@@ -720,6 +720,9 @@ class Compiler(StmtMixin, ExprMixin):
         for name, ctype, value_node in mod_info.constants:
             if value_node:
                 val = self.compile_expr(value_node)
+                # If annotation was bare `const`, infer C type from value
+                if ctype == "const":
+                    ctype = self.infer_type(value_node)
                 self.emit(f"const {ctype} {name} = {val};")
         if mod_info.constants:
             self.emit("")
@@ -927,6 +930,8 @@ class Compiler(StmtMixin, ExprMixin):
             self.emit_header(f"{ret} {prefix}{fname}({arg_str});")
 
         for name, ctype, value_node in mod_info.constants:
+            if ctype == "const":
+                ctype = self.infer_type(value_node) if value_node else "int64_t"
             self.emit_header(f"extern const {ctype} {name};")
 
         for name, ctype, annotation, value_node in mod_info.globals:

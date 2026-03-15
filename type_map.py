@@ -194,9 +194,13 @@ def get_array_info(annotation, type_map=None):
         sl = annotation.slice
         if isinstance(sl, ast.Tuple) and len(sl.elts) == 2:
             elem_type = map_type(sl.elts[0], type_map)
-            size = None
-            if isinstance(sl.elts[1], ast.Constant):
-                size = sl.elts[1].value
+            size_node = sl.elts[1]
+            if isinstance(size_node, ast.Constant):
+                size = size_node.value
+            elif isinstance(size_node, ast.Name):
+                size = size_node.id  # constant name used as array size
+            else:
+                size = None
             return elem_type, size
     return "int64_t", 0
 

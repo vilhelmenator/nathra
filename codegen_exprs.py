@@ -214,6 +214,10 @@ class ExprMixin:
             self.emit(f'char {buf}[512]; snprintf({buf}, 512, "{fmt}"{arg_str});')
             return buf
 
+        if isinstance(node, ast.List):
+            elts = ", ".join(self.compile_expr(e) for e in node.elts)
+            return f"{{{elts}}}"
+
         if isinstance(node, ast.ListComp):
             return self._compile_listcomp(node)
 
@@ -376,8 +380,8 @@ class ExprMixin:
             if fname in cast_map:
                 return f"(({cast_map[fname]})({arg_str}))"
 
-            # addr_of(x) → &x
-            if fname == "addr_of":
+            # addr_of(x) / ref(x) → &x
+            if fname in ("addr_of", "ref"):
                 return f"(&{arg_str})"
 
             # deref(p) → *p
