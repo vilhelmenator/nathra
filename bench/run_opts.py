@@ -27,7 +27,7 @@ NOTES = {
     "saxpy":       "restrict → no aliasing-check prelude",
     "strided_sum": "constant specialisation (stride=4 folded in)",
     "small_alloc": "alloca substitution (no malloc/free per call)",
-    "soa_sum":     "@soa → sequential x[] vs stride-4 AoS access",
+    "soa_sum":     "@soa → 8B/elem read vs 64B/elem AoS (8-field struct, extract one field)",
 }
 
 # Python runs with smaller problem sizes; scale ms up to the C-scale workload
@@ -36,7 +36,7 @@ PY_SCALE = {
     "saxpy":       (4_000_000 / 200_000) * (100 / 50),   # N ratio × reps ratio
     "strided_sum": (1_000_000 /  50_000) * (100 / 50),
     "small_alloc": (5_000_000 /  20_000),                 # reps ratio only
-    "soa_sum":     (500_000 / 100_000) * (200 / 20),      # N ratio × reps ratio
+    "soa_sum":     (5_000_000 / 100_000) * (20 / 5),      # N ratio × reps ratio
 }
 
 

@@ -21,8 +21,8 @@ STRIDED_N:   const = 1_000_000    # N/4 — stride-4 accesses stay in bounds
 ALLOC_N:     const = 64           # int64 elements per scratch buffer
 ALLOC_BYTES: const = 512          # ALLOC_N * 8
 ALLOC_REPS:  const = 5_000_000    # calls to the scratch-buffer function
-SOA_N:       const = 500_000      # particles; 4 fields × 8B × 500K = 16 MB AoS, 4 MB SoA
-SOA_REPS:    const = 200
+SOA_N:       const = 5_000_000    # particles; 4 fields × 8B × 5M = 160 MB AoS, 40 MB SoA
+SOA_REPS:    const = 20
 
 # ---------------------------------------------------------------------------
 # 1. SAXPY  (out = a*x + y)
@@ -90,17 +90,20 @@ class Particle:
     x: float
     y: float
     z: float
+    vx: float
+    vy: float
+    vz: float
     mass: float
+    charge: float
 
-particles: array[Particle, 500000]     # → 4 flat double arrays in C
+particles: array[Particle, 5000000]    # → 4 flat double arrays in C
 
-def sum_x_soa(n: int) -> float:
-    total: float = 0.0
+@noinline
+def extract_x(out: ptr[float], n: int) -> void:
     i: int = 0
     while i < n:
-        total = total + particles[i].x  # rewritten: particles_x[i]
+        out[i] = particles[i].x    # rewritten: particles_x[i]
         i += 1
-    return total
 
 # ---------------------------------------------------------------------------
 # Micropy entry point (compiled only)
@@ -153,20 +156,25 @@ def main() -> int:
 
     i = 0
     while i < SOA_N:
-        particles[i].x = float(i) * 0.001
-        particles[i].y = float(i) * 0.002
-        particles[i].z = float(i) * 0.003
-        particles[i].mass = 1.0
+        particles[i].x      = float(i) * 0.001
+        particles[i].y      = float(i) * 0.002
+        particles[i].z      = float(i) * 0.003
+        particles[i].vx     = 0.0
+        particles[i].vy     = 0.0
+        particles[i].vz     = 0.0
+        particles[i].mass   = 1.0
+        particles[i].charge = 0.0
         i += 1
 
-    soa_result: float = 0.0
+    soa_out: ptr[float] = alloc(SOA_N * 8)
     t6: int = time_ms()
     r = 0
     while r < SOA_REPS:
-        soa_result = sum_x_soa(SOA_N)
+        extract_x(soa_out, SOA_N)
         r += 1
     t7: int = time_ms()
-    printf("%-20s  %12.6f  %8d\n", "soa_sum", soa_result, t7 - t6)
+    printf("%-20s  %12.6f  %8d\n", "soa_sum", soa_out[SOA_N / 2], t7 - t6)
+    free(soa_out)
 
     free(out)
     free(x)
@@ -186,8 +194,8 @@ if __name__ == "__main__":
     _STRD_N   = 50_000     # _N / 4
     _ALLOC_N  = 64
     _ALLOC_R  = 20_000     # scale × 250 → effective 5M
-    _SOA_N    = 100_000    # scale × 50 → effective 500K
-    _SOA_REPS = 20         # scale × 10 → effective 200
+    _SOA_N    = 100_000    # scale × 50 → effective 5M
+    _SOA_REPS = 20          # scale × 4  → effective 20
 
     _x   = [float(i) * 0.001 for i in range(_N)]
     _y   = [float(i) * 0.002 for i in range(_N)]
@@ -223,9 +231,10 @@ if __name__ == "__main__":
     _t5 = time_ms()
     printf("%-20s  %12d  %8d\n", "small_alloc", _total % 1000000, _t5 - _t4)
 
-    _soa_result = 0.0
+    _soa_out = [0.0] * _SOA_N
     _t6 = time_ms()
     for _ in range(_SOA_REPS):
-        _soa_result = sum(_px)
+        for _i in range(_SOA_N):
+            _soa_out[_i] = _px[_i]
     _t7 = time_ms()
-    printf("%-20s  %12.6f  %8d\n", "soa_sum", _soa_result, _t7 - _t6)
+    printf("%-20s  %12.6f  %8d\n", "soa_sum", _soa_out[_SOA_N // 2], _t7 - _t6)
