@@ -65,8 +65,10 @@ def export(fn: _T) -> _T:        return fn
 def noreturn(fn: _T) -> _T:      return fn
 def cold(fn: _T) -> _T:          return fn
 def hot(fn: _T) -> _T:           return fn
+def stream(fn: _T) -> _T:        return fn
 def simd(fn: _T) -> _T:          return fn
 def packed(cls: _T) -> _T:       return cls
+def soa(cls: _T) -> _T:          return cls
 def union(cls: _T) -> _T:        return cls
 def align(n: int) -> Callable:   return lambda x: x
 def generic(**kw) -> Callable:   return lambda x: x

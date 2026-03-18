@@ -731,6 +731,40 @@ class StmtMixin:
             var for var, status in self._escape_classify(node).items()
             if status == "local_only"
         }
+        # Alloca substitution for explicitly-freed locals: vars classified as
+        # "consumed" (programmer wrote free(var)) that are ONLY ever passed to
+        # free() and have a compile-time constant ≤4 KB alloc size.  These are
+        # semantically identical to auto-free vars for stack-substitution
+        # purposes — the explicit free() call will be suppressed at emit time.
+        _escape_status = self._escape_classify(node)
+        _consumed_vars = {v for v, s in _escape_status.items() if s == "consumed"}
+        self._alloca_consumed_vars: set = set()
+        for _stmt in node.body:
+            if (isinstance(_stmt, ast.AnnAssign)
+                    and isinstance(_stmt.target, ast.Name)
+                    and _stmt.value
+                    and isinstance(_stmt.value, ast.Call)
+                    and isinstance(_stmt.value.func, ast.Name)
+                    and _stmt.value.func.id in _ALLOC_FUNCS
+                    and len(_stmt.value.args) == 1
+                    and isinstance(_stmt.value.args[0], ast.Constant)
+                    and isinstance(_stmt.value.args[0].value, int)
+                    and 0 < _stmt.value.args[0].value <= 4096
+                    and _stmt.target.id in _consumed_vars):
+                _vname = _stmt.target.id
+                _free_only = True
+                for _n in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+                    if (isinstance(_n, ast.Call)
+                            and isinstance(_n.func, ast.Name)
+                            and _n.func.id not in _FREE_FUNCS):
+                        for _a in _n.args:
+                            if isinstance(_a, ast.Name) and _a.id == _vname:
+                                _free_only = False
+                                break
+                    if not _free_only:
+                        break
+                if _free_only:
+                    self._alloca_consumed_vars.add(_vname)
         # Allocation merging: collect top-level constant-size local-only allocs.
         # If ≥ 2 found, emit one stack buffer and carve named offsets from it.
         _merge_candidates = []
@@ -992,6 +1026,14 @@ class StmtMixin:
         elif isinstance(node, ast.For):
             self.compile_for(node)
         elif isinstance(node, ast.Expr):
+            # free(var) where var was alloca-substituted — suppress the call
+            if (isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in _FREE_FUNCS
+                    and len(node.value.args) == 1
+                    and isinstance(node.value.args[0], ast.Name)
+                    and node.value.args[0].id in getattr(self, '_alloca_consumed_vars', set())):
+                return
             # c_code() inline C passthrough
             if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
                 if node.value.func.id == "c_code":
@@ -1186,7 +1228,8 @@ class StmtMixin:
                               f" + (int64_t)((sizeof(MpList)+7)&~7));")
                 return
             # Escape-analysis alloc optimizations (local-only pointer, no escape)
-            if (name in self._auto_free_vars
+            if ((name in self._auto_free_vars
+                    or name in getattr(self, '_alloca_consumed_vars', set()))
                     and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name)
                     and node.value.func.id in _ALLOC_FUNCS

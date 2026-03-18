@@ -1346,7 +1346,14 @@ class Compiler(StmtMixin, ExprMixin):
         for name, ctype, annotation, value_node in mod_info.globals:
             if ctype == "__array__":
                 elem_type, size = get_array_info(annotation)
-                if value_node:
+                # @soa expansion: array[SoAStruct, N] → one flat array per field
+                if elem_type in self.soa_structs:
+                    _soa_fields = [(fn, ft) for fn, ft in self.structs.get(elem_type, [])
+                                   if ft and ft not in ("__array__", "__funcptr__", "__vec__")]
+                    for _fn, _ft in _soa_fields:
+                        self.emit(f"{_ft} {name}_{_fn}[{size}] = {{0}};")
+                    self._soa_vars[name] = (elem_type, str(size), _soa_fields)
+                elif value_node:
                     val = self.compile_expr(value_node)
                     self.emit(f"{elem_type} {name}[{size}] = {val};")
                 else:
@@ -1581,7 +1588,13 @@ class Compiler(StmtMixin, ExprMixin):
         for name, ctype, annotation, value_node in mod_info.globals:
             if ctype == "__array__":
                 elem_type, size = get_array_info(annotation)
-                self.emit_header(f"extern {elem_type} {name}[{size}];")
+                if elem_type in self.soa_structs:
+                    _soa_fields = [(fn, ft) for fn, ft in self.structs.get(elem_type, [])
+                                   if ft and ft not in ("__array__", "__funcptr__", "__vec__")]
+                    for _fn, _ft in _soa_fields:
+                        self.emit_header(f"extern {_ft} {name}_{_fn}[{size}];")
+                else:
+                    self.emit_header(f"extern {elem_type} {name}[{size}];")
             elif ctype != "__funcptr__":
                 self.emit_header(f"extern {ctype} {name};")
 
