@@ -1,0 +1,231 @@
+"""
+bench_opts.mpy — optimization contrast benchmark.
+
+Run as Python:   python3 bench/bench_opts.mpy
+Run as micropy:  python3 mpy.py bench/bench_opts.mpy --run
+
+Demonstrates four automatic micropy optimizations vs plain C:
+  1. restrict inference  — SAXPY with 3 ptr params → restrict enables SIMD
+  2. constant specializ. — strided sum called from @hot with stride=4 constant
+  3. alloca substitution — local alloc(≤4KB) replaced with stack allocation
+  4. @soa layout         — Struct-of-Arrays for sequential field access
+"""
+from micropy import *
+
+# ---------------------------------------------------------------------------
+# Module-level constants — used by main() when compiled
+# ---------------------------------------------------------------------------
+N:           const = 4_000_000    # elements per array (3 arrays = 96 MB)
+REPS:        const = 100
+STRIDED_N:   const = 1_000_000    # N/4 — stride-4 accesses stay in bounds
+ALLOC_N:     const = 64           # int64 elements per scratch buffer
+ALLOC_BYTES: const = 512          # ALLOC_N * 8
+ALLOC_REPS:  const = 5_000_000    # calls to the scratch-buffer function
+SOA_N:       const = 500_000      # particles; 4 fields × 8B × 500K = 16 MB AoS, 4 MB SoA
+SOA_REPS:    const = 200
+
+# ---------------------------------------------------------------------------
+# 1. SAXPY  (out = a*x + y)
+#    Three ptr[float] params, none assigned from another → all get restrict.
+#    restrict removes the runtime aliasing-check prelude the C compiler must
+#    emit without it, and unlocks full SIMD vectorisation.
+# ---------------------------------------------------------------------------
+def saxpy(out: ptr[float], x: ptr[float], y: ptr[float], a: float, n: int) -> void:
+    i: int = 0
+    while i < n:
+        out[i] = a * x[i] + y[i]
+        i += 1
+
+# ---------------------------------------------------------------------------
+# 2. Strided reduction
+#    Called from a @hot context with the compile-time constant stride=4.
+#    micropy emits a specialised copy with stride folded in — the index
+#    multiply disappears and the loop body becomes more vectorisable.
+# ---------------------------------------------------------------------------
+def strided_sum(arr: ptr[float], n: int, stride: int) -> float:
+    total: float = 0.0
+    i: int = 0
+    while i < n:
+        total = total + arr[i * stride]
+        i += 1
+    return total
+
+@hot
+def bench_strided(arr: ptr[float], n: int) -> float:
+    return strided_sum(arr, n, 4)   # stride=4 is a compile-time constant here
+
+# ---------------------------------------------------------------------------
+# 3. Alloca substitution
+#    alloc(ALLOC_BYTES) is a compile-time constant ≤ 4 KB, and scratch is
+#    local-only (never returned or stored into a struct field).
+#    micropy replaces it with alloca(ALLOC_BYTES) and drops the free() call.
+#    Stack allocation costs ~1 ns (a single sub instruction on the stack
+#    pointer); malloc/free costs ~30–100 ns per call on most allocators.
+# ---------------------------------------------------------------------------
+def process_with_scratch(data: ptr[int], n: int) -> int:
+    scratch: ptr[int] = alloc(512)           # → alloca(512) in micropy
+    i: int = 0
+    while i < n:
+        scratch[i] = data[i] * 2 + 1
+        i += 1
+    total: int = 0
+    i = 0
+    while i < n:
+        total = total + scratch[i]
+        i += 1
+    free(scratch)                            # dropped by micropy (alloca)
+    return total
+
+# ---------------------------------------------------------------------------
+# 4. Struct-of-Arrays (@soa)
+#    AoS layout: Particle[i].x is at byte offset i*32 — every cache line holds
+#    2 structs but only 1/4 of it is the x field → 75% wasted bandwidth.
+#    SoA layout: particles_x[i] is sequential — every byte fetched is useful,
+#    and the hardware prefetcher and SIMD can operate at full width.
+#    With 500K particles (16 MB AoS vs 4 MB SoA for x), the benchmark is
+#    L3-bound for SoA but DRAM-bound for AoS → ~3-4× speedup.
+# ---------------------------------------------------------------------------
+@soa
+class Particle:
+    x: float
+    y: float
+    z: float
+    mass: float
+
+particles: array[Particle, 500000]     # → 4 flat double arrays in C
+
+def sum_x_soa(n: int) -> float:
+    total: float = 0.0
+    i: int = 0
+    while i < n:
+        total = total + particles[i].x  # rewritten: particles_x[i]
+        i += 1
+    return total
+
+# ---------------------------------------------------------------------------
+# Micropy entry point (compiled only)
+# ---------------------------------------------------------------------------
+def main() -> int:
+    out: ptr[float] = alloc(N * 8)
+    x:   ptr[float] = alloc(N * 8)
+    y:   ptr[float] = alloc(N * 8)
+    data: ptr[int]  = alloc(ALLOC_N * 8)
+
+    i: int = 0
+    while i < N:
+        x[i] = float(i) * 0.001
+        y[i] = float(i) * 0.002
+        i += 1
+    i = 0
+    while i < ALLOC_N:
+        data[i] = i + 1
+        i += 1
+
+    printf("%-20s  %12s  %8s\n", "benchmark", "result", "ms")
+    printf("%-20s  %12s  %8s\n", "--------------------", "------------", "--------")
+
+    t0: int = time_ms()
+    r: int = 0
+    while r < REPS:
+        saxpy(out, x, y, 2.5, N)
+        r += 1
+    t1: int = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "saxpy", out[N / 2], t1 - t0)
+
+    result: float = 0.0
+    t2: int = time_ms()
+    r = 0
+    while r < REPS:
+        result = bench_strided(x, STRIDED_N)
+        r += 1
+    t3: int = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "strided_sum", result, t3 - t2)
+
+    total: int = 0
+    t4: int = time_ms()
+    r = 0
+    while r < ALLOC_REPS:
+        data[0] = r            # vary input to prevent loop-invariant hoisting
+        total = total + process_with_scratch(data, ALLOC_N)
+        r += 1
+    t5: int = time_ms()
+    printf("%-20s  %12d  %8d\n", "small_alloc", total % 1_000_000, t5 - t4)
+
+    i = 0
+    while i < SOA_N:
+        particles[i].x = float(i) * 0.001
+        particles[i].y = float(i) * 0.002
+        particles[i].z = float(i) * 0.003
+        particles[i].mass = 1.0
+        i += 1
+
+    soa_result: float = 0.0
+    t6: int = time_ms()
+    r = 0
+    while r < SOA_REPS:
+        soa_result = sum_x_soa(SOA_N)
+        r += 1
+    t7: int = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "soa_sum", soa_result, t7 - t6)
+
+    free(out)
+    free(x)
+    free(y)
+    free(data)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Python fallback — smaller counts so the run completes in ~5 seconds.
+# The alloca substitution does not apply to Python (which uses its own
+# object allocator), but the timing still shows how far Python lags.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    _N        = 200_000
+    _REPS     = 50
+    _STRD_N   = 50_000     # _N / 4
+    _ALLOC_N  = 64
+    _ALLOC_R  = 20_000     # scale × 250 → effective 5M
+    _SOA_N    = 100_000    # scale × 50 → effective 500K
+    _SOA_REPS = 20         # scale × 10 → effective 200
+
+    _x   = [float(i) * 0.001 for i in range(_N)]
+    _y   = [float(i) * 0.002 for i in range(_N)]
+    _out = [0.0] * _N
+    _data = list(range(1, _ALLOC_N + 1))
+    _px  = [float(i) * 0.001 for i in range(_SOA_N)]  # SoA x-field equivalent
+
+    printf("%-20s  %12s  %8s\n", "benchmark", "result", "ms")
+    printf("%-20s  %12s  %8s\n", "--------------------", "------------", "--------")
+
+    _t0 = time_ms()
+    for _ in range(_REPS):
+        saxpy(_out, _x, _y, 2.5, _N)
+    _t1 = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "saxpy", _out[_N // 2], _t1 - _t0)
+
+    _result = 0.0
+    _t2 = time_ms()
+    for _ in range(_REPS):
+        _result = strided_sum(_x, _STRD_N, 4)
+    _t3 = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "strided_sum", _result, _t3 - _t2)
+
+    _total = 0
+    _t4 = time_ms()
+    for _r in range(_ALLOC_R):
+        _data[0] = _r
+        _scratch = [0] * _ALLOC_N
+        for i in range(_ALLOC_N):
+            _scratch[i] = _data[i] * 2 + 1
+        for i in range(_ALLOC_N):
+            _total += _scratch[i]
+    _t5 = time_ms()
+    printf("%-20s  %12d  %8d\n", "small_alloc", _total % 1000000, _t5 - _t4)
+
+    _soa_result = 0.0
+    _t6 = time_ms()
+    for _ in range(_SOA_REPS):
+        _soa_result = sum(_px)
+    _t7 = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "soa_sum", _soa_result, _t7 - _t6)
