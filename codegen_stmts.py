@@ -16,7 +16,7 @@ _ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
 _FREE_FUNCS  = frozenset({"free",  "mp_free"})
 
 
-def _ptr_is_written(body, param_name: str) -> bool:
+def _ptr_is_written(body, param_name: str, func_param_types: dict = None) -> bool:
     """Return True if param_name is ever written through in body.
 
     A write-through is any assignment whose LHS root is param_name and
@@ -24,6 +24,10 @@ def _ptr_is_written(body, param_name: str) -> bool:
       param[i] = v        (Subscript write)
       param.field = v     (Attribute write)
       param[i] += v       (AugAssign Subscript)
+
+    When func_param_types is provided, also checks whether param_name is
+    passed as argument i to a callee whose i-th param is a non-const pointer
+    (the callee may mutate through the pointer, e.g. struct method self args).
     """
     def _root(target) -> str:
         while isinstance(target, (ast.Subscript, ast.Attribute)):
@@ -41,6 +45,33 @@ def _ptr_is_written(body, param_name: str) -> bool:
                 if (isinstance(node.target, (ast.Subscript, ast.Attribute))
                         and _root(node.target) == param_name):
                     return True
+            elif isinstance(node, ast.Call) and func_param_types is not None:
+                if isinstance(node.func, ast.Attribute):
+                    # Method call: param.method(...) — param is the receiver (self).
+                    # Look up StructType_method; if its first param (self) is a
+                    # non-const pointer, param_name is mutated.
+                    if (isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == param_name):
+                        method = node.func.attr
+                        # Search for any StructType_method entry whose self is non-const
+                        for key, ptypes in func_param_types.items():
+                            if (key.endswith(f"_{method}")
+                                    and ptypes
+                                    and ptypes[0].endswith("*")
+                                    and not ptypes[0].startswith("const ")):
+                                return True
+                elif isinstance(node.func, ast.Name):
+                    # Free-function call: SomeFunc(param, ...) — check by position.
+                    callee = node.func.id
+                    ptypes = func_param_types.get(callee)
+                    if ptypes:
+                        for i, call_arg in enumerate(node.args):
+                            if (isinstance(call_arg, ast.Name)
+                                    and call_arg.id == param_name
+                                    and i < len(ptypes)):
+                                ptype = ptypes[i]
+                                if ptype.endswith("*") and not ptype.startswith("const "):
+                                    return True
     return False
 
 
@@ -297,7 +328,7 @@ class StmtMixin:
                     and not atype.startswith("const ")
                     and atype != "void*"
                     and arg.arg != "self"
-                    and not _ptr_is_written(node.body, arg.arg)):
+                    and not _ptr_is_written(node.body, arg.arg, self.func_param_types)):
                 const_prefix = "const "
             args.append(f"{const_prefix}{atype} {arg.arg}")
             self.func_args[arg.arg] = atype  # store without const for type inference
@@ -1038,6 +1069,12 @@ class StmtMixin:
                 self.indent += 1
                 if _prefetch_arrs:
                     for _arr in _prefetch_arrs:
+                        if _arr in self._array_vars:
+                            try:
+                                if int(self._array_vars[_arr][1]) <= 8:
+                                    continue
+                            except (ValueError, TypeError):
+                                pass
                         self.emit(f"MP_PREFETCH(&{_arr}[{_target_id} + 8], 0, 1);")
                 for stmt in node.body:
                     self.compile_stmt(stmt)
@@ -1116,6 +1153,12 @@ class StmtMixin:
         self.indent += 1
         if _arrays_to_prefetch:
             for _arr in _arrays_to_prefetch:
+                if _arr in self._array_vars:
+                    try:
+                        if int(self._array_vars[_arr][1]) <= _prefetch_dist:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
                 self.emit(f"MP_PREFETCH(&{_arr}[{target} + {_prefetch_dist}], 0, 1);")
         for offset in range(factor):
             self.emit(f"/* iteration +{offset} */")

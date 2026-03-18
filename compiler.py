@@ -899,6 +899,7 @@ class Compiler(StmtMixin, ExprMixin):
                 mod_info.functions[node.name] = (ret_type, args)
                 self.func_ret_types[node.name] = ret_type
                 self.func_param_order[node.name] = [a.arg for a in node.args.args]
+                self.func_param_types[node.name] = [map_type(a.annotation) for a in node.args.args]
 
                 # Collect default parameter values (right-aligned in ast.arguments.defaults)
                 n_args = len(node.args.args)
@@ -981,6 +982,7 @@ class Compiler(StmtMixin, ExprMixin):
                             mod_info.functions[method_cname] = (ret_type, method_args)
                             self.func_ret_types[method_cname] = ret_type
                             self.func_param_order[method_cname] = [a.arg for a in item.args.args]
+                            self.func_param_types[method_cname] = [t for _, t in method_args]
 
                     if impl_traits:
                         self.trait_impls[node.name] = impl_traits
