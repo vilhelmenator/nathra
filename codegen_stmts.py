@@ -11,6 +11,10 @@ _NARROW_INT_TYPES = frozenset({
 })
 _WIDE_INT_TYPES = frozenset({"int64_t", "int", "uint64_t"})
 
+# Allocation primitives shared with the ownership analysis in compiler.py
+_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
+_FREE_FUNCS  = frozenset({"free",  "mp_free"})
+
 
 class StmtMixin:
     # -------------------------------------------------------------------
@@ -304,6 +308,11 @@ class StmtMixin:
             self.emit(f"{sig} {{")
 
         self.indent += 1
+        # Pre-classify alloc'd locals so compile_ann_assign can auto-defer free()
+        self._auto_free_vars = {
+            var for var, status in self._escape_classify(node).items()
+            if status == "local_only"
+        }
         for stmt in node.body:
             self.compile_stmt(stmt)
 
@@ -322,6 +331,7 @@ class StmtMixin:
         self._array_vars = {}
         self._list_vars = {}
         self._vec_vars = {}
+        self._auto_free_vars = set()
         self._in_simd_func = False
 
     # -------------------------------------------------------------------
@@ -498,6 +508,12 @@ class StmtMixin:
             val = self.compile_expr(node.value)
             val = self._coerce(val, self.infer_type(node.value), ctype)
             self.emit(f"{ctype} {name} = {val};")
+            # Scope-based auto-free: if this is a local-only alloc, defer cleanup
+            if (name in self._auto_free_vars
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in _ALLOC_FUNCS):
+                self.defer_stack.append(f"free({name})")
         else:
             self.emit(f"{ctype} {name};")
 

@@ -33,14 +33,14 @@ The correctness pass costs nothing at runtime; all of it is compile-time analysi
 
 ### Auto-corrections *(uses both foundation primitives)*
 
-- [ ] **Scope-based auto-free**
+- [x] **Scope-based auto-free**
   For any local-only pointer: automatically insert `free` on every exit path —
   including early `return` and `raise` branches. Uses the existing defer-stack
   mechanism. Programmer writes `alloc`, compiler handles cleanup. At call sites,
   check the function tag: if the callee is *Consumer*, ownership is discharged;
   if *Borrows*, the caller still owns it.
 
-- [ ] **Error-path auto-free**
+- [x] **Error-path auto-free**
   When a `raise` is emitted and there are live unfreed local-only allocations,
   emit `free` calls in reverse allocation order before the raise. This is the bug
   Rust's drop glue prevents; MicroPy does it as a codegen pass with no language

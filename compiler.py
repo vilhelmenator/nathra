@@ -8,14 +8,10 @@ from typing import Optional
 
 from type_map import TYPE_MAP, ALIAS_MAP, TUPLE_RET_MAP, map_type, mangle_type, get_array_info, get_typed_list_elem, gen_typed_list, get_funcptr_info
 import type_map as _type_map_mod
-from codegen_stmts import StmtMixin
+from codegen_stmts import StmtMixin, _ALLOC_FUNCS, _FREE_FUNCS
 from codegen_exprs import ExprMixin
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-
-# Allocation primitives recognised by the escape / ownership analysis
-_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
-_FREE_FUNCS  = frozenset({"free",  "mp_free"})
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +88,7 @@ class Compiler(StmtMixin, ExprMixin):
     emit_line_directives: bool = True  # set False with --no-line-directives
     _lambda_table: dict = field(default_factory=dict)  # id(ast.Lambda) → name
     func_alloc_tags: dict = field(default_factory=dict)  # fname → frozenset of "producer"|"consumer"|"borrows"|"stores"
+    _auto_free_vars: set = field(default_factory=set)    # locals auto-deferred for free() in current function
 
     def emit(self, line=""):
         prefix = "    " * self.indent
@@ -146,13 +143,13 @@ class Compiler(StmtMixin, ExprMixin):
     # -------------------------------------------------------------------
 
     def _escape_classify(self, func_node: ast.FunctionDef) -> dict:
-        """Return {var_name: True/False} for every local variable assigned
-        directly from an alloc() call.  True = escapes, False = local-only.
+        """Return {var_name: status} for every local assigned from alloc().
 
-        A variable is considered escaping if it is:
-          - returned from the function
-          - passed as an argument to any function call
-          - assigned into a struct field (x.field = var)
+        Status values:
+          "local_only" — never freed, never escapes → auto-free candidate
+          "consumed"   — passed to free() or a Consumer-tagged function
+          "escaping"   — returned, stored in struct, or passed to a
+                         Stores-tagged or unknown function
         """
         alloc_vars: dict = {}
         for node in ast.walk(func_node):
@@ -160,33 +157,55 @@ class Compiler(StmtMixin, ExprMixin):
                 if (node.value and isinstance(node.value, ast.Call)
                         and isinstance(node.value.func, ast.Name)
                         and node.value.func.id in _ALLOC_FUNCS):
-                    alloc_vars[node.target.id] = False
+                    alloc_vars[node.target.id] = "local_only"
             elif isinstance(node, ast.Assign):
                 for t in node.targets:
                     if isinstance(t, ast.Name):
                         if (isinstance(node.value, ast.Call)
                                 and isinstance(node.value.func, ast.Name)
                                 and node.value.func.id in _ALLOC_FUNCS):
-                            alloc_vars[t.id] = False
+                            alloc_vars[t.id] = "local_only"
 
         if not alloc_vars:
             return {}
 
         for node in ast.walk(func_node):
+            # Returned — definitely escapes
             if isinstance(node, ast.Return) and node.value:
                 if isinstance(node.value, ast.Name) and node.value.id in alloc_vars:
-                    alloc_vars[node.value.id] = True
-            elif isinstance(node, ast.Call):
-                for arg in node.args:
-                    if isinstance(arg, ast.Name) and arg.id in alloc_vars:
-                        alloc_vars[arg.id] = True
+                    alloc_vars[node.value.id] = "escaping"
+
+            # Stored into struct field — escapes
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Attribute):
                         if isinstance(node.value, ast.Name) and node.value.id in alloc_vars:
-                            alloc_vars[node.value.id] = True
+                            alloc_vars[node.value.id] = "escaping"
 
-        return alloc_vars  # {var: True=escaping, False=local-only}
+            # Passed to a call — classify by callee tag
+            elif isinstance(node, ast.Call):
+                fname = node.func.id if isinstance(node.func, ast.Name) else None
+                for arg in node.args:
+                    if not (isinstance(arg, ast.Name) and arg.id in alloc_vars):
+                        continue
+                    cur = alloc_vars[arg.id]
+                    if cur == "escaping":
+                        continue  # already worst case
+                    if fname in _FREE_FUNCS:
+                        alloc_vars[arg.id] = "consumed"
+                    else:
+                        tags = self.func_alloc_tags.get(fname, frozenset())
+                        if "consumer" in tags:
+                            alloc_vars[arg.id] = "consumed"
+                        elif "stores" in tags:
+                            alloc_vars[arg.id] = "escaping"
+                        elif tags and "borrows" in tags and "stores" not in tags:
+                            pass  # caller retains ownership — no change
+                        else:
+                            # unknown / extern → conservative
+                            alloc_vars[arg.id] = "escaping"
+
+        return alloc_vars
 
     def _build_alloc_tags(self, tree) -> None:
         """Populate self.func_alloc_tags[fname] = frozenset of allocation roles.
