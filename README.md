@@ -95,7 +95,31 @@ p1: Point = Point(1.0, 2.0)
 p2: Point = Point(y=4.0, x=3.0)
 ```
 
-Decorators: `@packed`, `@align(N)`.
+Decorators: `@packed`, `@align(N)`, `@hot`, `@soa`.
+
+`@soa` (Struct-of-Arrays) — when a struct is annotated `@soa`, any `array[T, N]` of that type is expanded into one flat array per field. Field accesses rewrite automatically:
+
+```python
+@soa
+class Particle:
+    x: float
+    y: float
+    z: float
+    mass: float
+
+particles: array[Particle, 1000]
+particles[i].x = 1.0   # emits: particles_x[i] = 1.0
+```
+
+Generated C:
+```c
+double particles_x[1000];
+double particles_y[1000];
+double particles_z[1000];
+double particles_mass[1000];
+```
+
+Unsupported patterns (compile error): whole-element read/write (`p = particles[i]`), method calls on element, `ref(particles[i])`, passing a SoA array where `ptr[T]` is expected.
 
 Special methods: `__init__`, `__add__`/`__sub__`/`__mul__`/`__truediv__`, `__neg__`, `__eq__`/`__lt__` etc., `__len__` (called by `len(x)`), `__bool__` (called in `if x:` and `while x:`).
 
@@ -174,7 +198,16 @@ def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return x
 ```
 
-Decorators: `@inline`, `@noinline`, `@noreturn`, `@cold`, `@hot`, `@extern`, `@export`, `@staticmethod`.
+Decorators: `@inline`, `@noinline`, `@noreturn`, `@cold`, `@hot`, `@stream`, `@extern`, `@export`, `@staticmethod`.
+
+`@stream` — marks a function as a single-pass streaming writer. Subscript writes inside `for` loops emit `__builtin_nontemporal_store` instead of regular stores, bypassing the cache entirely. Use when a loop writes every element exactly once and never re-reads — avoids evicting hot data from L1/L2:
+
+```python
+@stream
+def fill_zeros(buf: ptr[float], n: int) -> void:
+    for i in range(0, n):
+        buf[i] = 0.0   # emits: __builtin_nontemporal_store(0.0, &buf[i])
+```
 
 `-> None` is equivalent to `-> void`. `None` as a value emits `NULL` and is valid anywhere a pointer is expected:
 
@@ -784,6 +817,76 @@ Compiler errors point directly to the `.mpy` source line via `#line` directives:
 ```
 tests/my_prog.mpy:12:5: error: use of undeclared identifier 'typo'
 ```
+
+## Compiler optimizations
+
+The compiler performs a set of automatic analyses and rewrites at compile time. All are zero-cost in the sense that nothing is added at runtime that wasn't already implied by the source.
+
+### `restrict` inference
+
+When a function takes two or more `ptr[T]` parameters and none of them is ever assigned from another within the function body, the compiler emits `restrict` on each parameter. This is the single highest-value qualifier for loop vectorization — the C compiler cannot insert it on its own.
+
+```python
+def copy_bytes(dst: ptr[byte], src: ptr[byte], n: int) -> void:
+    ...
+# emits: void copy_bytes(uint8_t * restrict dst, uint8_t * restrict src, int64_t n)
+```
+
+If any pointer is assigned from another (`a = b`), neither receives `restrict`.
+
+### Branch-free select
+
+An `if/else` that assigns the same variable in both arms using only pure expressions (literals, locals, arithmetic — no calls, no pointer derefs with side effects) is emitted as a C ternary `?:`. The C compiler sometimes converts `if/else` to a `cmov` instruction but only when it can prove both arms are side-effect-free; micropy knows this from the AST.
+
+```python
+result: int = 0
+if x < 0:
+    result = -x
+else:
+    result = x
+# emits: result = ((x < 0) ? (-x) : (x));
+```
+
+### Loop unroll hints
+
+`for i in range(N)` where `N` is a small compile-time constant (≤ 8) emits `#pragma GCC unroll N` immediately before the loop, giving the C compiler a reliable unroll hint without manual `@unroll` annotation.
+
+```python
+for i in range(4):
+    total = total + arr[i]
+# emits: #pragma GCC unroll 4
+#        for (int64_t i = 0; i < 4; i++) { ... }
+```
+
+### Stack variable lifetime narrowing
+
+Large local variables are wrapped in a `{ }` block scope sized to their actual first/last use, so the C compiler knows the stack slot can be reused for a non-overlapping local. micropy can guarantee this safely because it tracks whether `&var` is ever taken; C compilers must conservatively assume it might be.
+
+### Hot/cold splitting
+
+When an `if` arm contains only error handling (a `raise`, a call to a `@cold` function, or another cold `if`) the arm is extracted into a separate `static __attribute__((cold))` helper and the branch is wrapped in `MP_UNLIKELY(...)`. This keeps the hot path's instruction footprint tight for I-cache utilisation.
+
+```python
+def safe_divide(a: int, b: int) -> int:
+    if b == 0:
+        raise "division by zero"
+    return a / b
+# The raise arm becomes a separate cold helper; the hot path is just the division.
+```
+
+Functions whose every code path ends in `raise` or `abort()` are automatically annotated `__attribute__((cold, noreturn))` — no annotation required.
+
+### Constant specialization for `@hot` functions
+
+When a `@hot` function calls a callee with a compile-time constant argument, the compiler emits a specialized copy of the callee with that constant folded in. The constant enables the C compiler to vectorize, strength-reduce, and eliminate branches in ways it cannot with a variable argument.
+
+```python
+@hot
+def process(arr: ptr[int], n: int) -> int:
+    return scaled_sum(arr, n, 4)   # stride=4 is constant → specialized copy emitted
+```
+
+**Threshold:** up to 3 distinct constant combinations per callee are specialized freely (one copy each, negligible code size). Beyond 3 distinct combinations, specialization proceeds only for callees with ≤ 30 statements. Functions inside `@hot` or `@unroll` contexts are always eligible.
 
 ## Benchmark
 
