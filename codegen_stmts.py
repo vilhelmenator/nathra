@@ -356,7 +356,7 @@ class StmtMixin:
             attrs.append("noinline")
         if "noreturn" in decs:
             attrs.append("noreturn")
-        if "cold" in decs:
+        if "cold" in decs or fname in self._cold_funcs:
             attrs.append("cold")
         if "hot" in decs:
             attrs.append("hot")

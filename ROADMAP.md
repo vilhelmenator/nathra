@@ -167,12 +167,12 @@ Items marked ✅ are already implemented.
 
 ### Structural passes — moderate bookkeeping
 
-- [ ] **`@cold` inference from function body**
+- [x] **`@cold` inference from function body**
   If every code path in a function terminates in `raise`, `abort()`, or a call to
   another `@cold` function — auto-annotate `__attribute__((cold))`. No annotation
   required from the programmer.
 
-- [ ] **`@cold` inference via call-site analysis**
+- [x] **`@cold` inference via call-site analysis**
   If a function is *only ever called* from error branches (guard-raise paths,
   `is_err(...)` blocks) — auto-annotate `__attribute__((cold))`. Higher value than
   body inference; catches helper functions that look normal in isolation.
@@ -214,3 +214,50 @@ Items marked ✅ are already implemented.
 - [ ] **Struct field sparsity warning**
   At struct definition time, compute the natural layout and warn if field ordering
   would leave gaps larger than a cache line. Suggest a reordered layout.
+
+- [ ] **`@soa` Array-of-Structs → Struct-of-Arrays transformation**
+  Explicit `@soa` annotation on a struct class. When an `array[T, N]` is declared
+  where `T` is `@soa`-annotated, the compiler expands it into one parallel array per
+  field instead of a single struct array. All `arr[i].field` accesses rewrite to
+  `arr_field[i]`. ~80-120 lines across compiler.py, codegen_stmts.py, codegen_exprs.py.
+
+  ```python
+  @soa
+  class Particle:
+      x: float
+      y: float
+      z: float
+      mass: float
+
+  particles: array[Particle, 1000]
+  particles[i].x = 1.0       # reads/writes go through flat arrays
+  ```
+
+  Generated C:
+  ```c
+  double particles_x[1000];
+  double particles_y[1000];
+  double particles_z[1000];
+  double particles_mass[1000];
+
+  particles_x[i] = 1.0;
+  ```
+
+  **Compile-time errors** (patterns that defeat SoA):
+  - `p = particles[i]` — whole-element read (would need gather)
+  - `particles[i] = p` — whole-element write (would need scatter)
+  - `particles[i].method()` — method call on element
+  - `ref(particles[i])` — pointer to element doesn't exist in SoA layout
+  - Passing a SoA array where `ptr[T]` is expected
+
+  **Implementation steps:**
+  1. First pass: record `@soa` structs in `self.soa_structs: set` (~5 lines)
+  2. Array declaration: expand `array[SoA_T, N]` to per-field arrays (~20 lines)
+  3. Field access: rewrite `arr[i].field` → `arr_field[i]` in codegen_exprs (~20 lines)
+  4. Field assignment: same rewrite on LHS in codegen_stmts (~15 lines)
+  5. Error on unsupported patterns: whole-element access, method calls, `ref()` (~20 lines)
+
+  **Future extensions** (not in v1):
+  - Auto gather/scatter for whole-element access
+  - SoA-aware method rewriting (method takes field pointers instead of struct pointer)
+  - Nested SoA structs

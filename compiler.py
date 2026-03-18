@@ -14,6 +14,35 @@ from codegen_exprs import ExprMixin
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _body_is_all_cold(stmts: list, cold_funcs: set) -> bool:
+    """Return True if every code path through stmts terminates coldly.
+
+    A cold terminal is: raise, a call to abort(), or a bare call to a @cold function.
+    An if/else where BOTH branches are all-cold is also a cold terminal.
+    Any return statement → not all-cold.
+    """
+    if not stmts:
+        return False
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return):
+            return False
+        if isinstance(stmt, ast.Raise):
+            return True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            fname = (call.func.id if isinstance(call.func, ast.Name) else
+                     call.func.attr if isinstance(call.func, ast.Attribute) else None)
+            if fname in cold_funcs or fname == "abort":
+                return True
+        if isinstance(stmt, ast.If):
+            then_cold = _body_is_all_cold(stmt.body, cold_funcs)
+            else_cold = (_body_is_all_cold(stmt.orelse, cold_funcs)
+                         if stmt.orelse else False)
+            if then_cold and else_cold:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -358,6 +387,116 @@ class Compiler(StmtMixin, ExprMixin):
                     for item in node.body:
                         if isinstance(item, ast.FunctionDef):
                             _propagate_producer_tag(item, prefix=f"{node.name}_")
+
+    # -------------------------------------------------------------------
+    # @cold inference
+    # -------------------------------------------------------------------
+
+    def _infer_cold_from_body(self, tree) -> None:
+        """Auto-tag @cold: functions whose every code path terminates coldly.
+
+        Fixpoint loop — a newly inferred cold function may unlock further
+        inference in callers. Stops when no new functions are added.
+        """
+        skip_decs = frozenset({"extern", "compile_time", "trait", "generic"})
+        changed = True
+        while changed:
+            changed = False
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.FunctionDef):
+                    if any(d in self.get_decorators(node) for d in skip_decs):
+                        continue
+                    fname = node.name
+                    if fname not in self._cold_funcs and _body_is_all_cold(node.body, self._cold_funcs):
+                        self._cold_funcs.add(fname)
+                        changed = True
+                elif isinstance(node, ast.ClassDef):
+                    decs = self.get_decorators(node)
+                    if "trait" in decs or self._is_enum_class(node):
+                        continue
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef):
+                            fname = f"{node.name}_{item.name}"
+                            if fname not in self._cold_funcs and _body_is_all_cold(item.body, self._cold_funcs):
+                                self._cold_funcs.add(fname)
+                                changed = True
+
+    def _infer_cold_from_callsites(self, tree) -> None:
+        """Auto-tag @cold: functions only ever called from error branches.
+
+        Error branches: guard-raise bodies (if cond: raise / abort / @cold call)
+        and is_err()/not is_ok() conditional blocks.
+        """
+        skip_decs = frozenset({"extern", "compile_time", "trait", "generic"})
+        warm_calls: set = set()   # called from at least one non-error context
+        all_calls: set = set()    # called at least once anywhere
+
+        def _is_err_cond(test) -> bool:
+            if isinstance(test, ast.Call) and isinstance(test.func, ast.Name):
+                return test.func.id == "is_err"
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                op = test.operand
+                if isinstance(op, ast.Call) and isinstance(op.func, ast.Name):
+                    return op.func.id == "is_ok"
+            return False
+
+        def _record_call(call_node, is_cold_ctx: bool) -> None:
+            if isinstance(call_node.func, ast.Name):
+                fname = call_node.func.id
+            elif isinstance(call_node.func, ast.Attribute):
+                fname = call_node.func.attr
+            else:
+                return
+            if fname in self._cold_funcs:
+                return
+            all_calls.add(fname)
+            if not is_cold_ctx:
+                warm_calls.add(fname)
+
+        def walk_expr(expr, is_cold_ctx: bool) -> None:
+            for node in ast.walk(expr):
+                if isinstance(node, ast.Call):
+                    _record_call(node, is_cold_ctx)
+
+        def walk_stmts(stmts, is_cold_ctx: bool) -> None:
+            for stmt in stmts:
+                if isinstance(stmt, ast.If):
+                    walk_expr(stmt.test, is_cold_ctx)
+                    body_cold = is_cold_ctx or _body_is_all_cold(stmt.body, self._cold_funcs)
+                    walk_stmts(stmt.body, body_cold)
+                    orelse_cold = is_cold_ctx or _is_err_cond(stmt.test)
+                    if stmt.orelse:
+                        walk_stmts(stmt.orelse, orelse_cold)
+                elif isinstance(stmt, (ast.While, ast.For)):
+                    if hasattr(stmt, "test"):
+                        walk_expr(stmt.test, is_cold_ctx)
+                    walk_stmts(stmt.body, is_cold_ctx)
+                elif isinstance(stmt, ast.With):
+                    walk_stmts(stmt.body, is_cold_ctx)
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    _record_call(stmt.value, is_cold_ctx)
+                    for arg in stmt.value.args:
+                        walk_expr(arg, is_cold_ctx)
+                elif isinstance(stmt, (ast.AnnAssign, ast.Assign)):
+                    val = getattr(stmt, "value", None)
+                    if val:
+                        walk_expr(val, is_cold_ctx)
+                elif isinstance(stmt, ast.Return) and stmt.value:
+                    walk_expr(stmt.value, is_cold_ctx)
+
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef):
+                if not any(d in self.get_decorators(node) for d in skip_decs):
+                    walk_stmts(node.body, False)
+            elif isinstance(node, ast.ClassDef):
+                decs = self.get_decorators(node)
+                if "trait" not in decs and not self._is_enum_class(node):
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef):
+                            walk_stmts(item.body, False)
+
+        for fname in all_calls - warm_calls:
+            self._cold_funcs.add(fname)
 
     # -------------------------------------------------------------------
     # Static leak detection
@@ -1114,6 +1253,10 @@ class Compiler(StmtMixin, ExprMixin):
 
         # Build allocation signature tags for every function in this module
         self._build_alloc_tags(tree)
+
+        # @cold inference: body analysis (fixpoint), then call-site analysis
+        self._infer_cold_from_body(tree)
+        self._infer_cold_from_callsites(tree)
 
         # Static leak detection — warns to stderr, no effect on codegen
         self._check_leaks(tree, self._current_file or filepath)
@@ -1931,7 +2074,7 @@ class Compiler(StmtMixin, ExprMixin):
                     and not atype.startswith("const ")
                     and atype != "void*"
                     and arg.arg != "self"
-                    and not _ptr_is_written(node.body, arg.arg)):
+                    and not _ptr_is_written(node.body, arg.arg, self.func_param_types)):
                 const_prefix = "const "
             args.append(f"{const_prefix}{atype} {arg.arg}")
         arg_str = ", ".join(args) if args else "void"
@@ -1948,6 +2091,8 @@ class Compiler(StmtMixin, ExprMixin):
             attrs.append("noinline")
         if "noreturn" in decs:
             attrs.append("noreturn")
+        if "cold" in decs or fname in self._cold_funcs:
+            attrs.append("cold")
         qual_str = " ".join(qualifiers) + (" " if qualifiers else "")
         attr_str = f" __attribute__(({', '.join(attrs)}))" if attrs else ""
         if fname == "main":
