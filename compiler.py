@@ -1342,7 +1342,21 @@ class Compiler(StmtMixin, ExprMixin):
         if mod_info.constants:
             self.emit("")
 
-        # Emit mutable globals — before structs for same reason
+        # Forward typedefs first so self-referential pointer fields (e.g. Node* next)
+        # can reference the struct name inside the body, then full definitions so
+        # global array declarations like `Node list_nodes[N]` have the complete type.
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name in self.structs:
+                decs = self.get_decorators(node)
+                kw = "union" if "union" in decs else "struct"
+                self.emit(f"typedef {kw} {node.name} {node.name};")
+        if self.structs:
+            self.emit("")
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name in self.structs:
+                self.compile_struct(node)
+
+        # Emit mutable globals
         for name, ctype, annotation, value_node in mod_info.globals:
             if ctype == "__array__":
                 elem_type, size = get_array_info(annotation)
@@ -1384,16 +1398,8 @@ class Compiler(StmtMixin, ExprMixin):
                 if "compile_time" in decs:
                     self._emit_compile_time(node, tree)
 
-        # Forward-declare all structs/unions so function prototypes can reference them
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef) and node.name in self.structs:
-                decs = self.get_decorators(node)
-                kw = "union" if "union" in decs else "struct"
-                self.emit(f"typedef {kw} {node.name} {node.name};")
-        if self.structs:
-            self.emit("")
-
-        # Emit function prototypes (forward declarations) — before structs so struct
+        # Emit function prototypes (forward declarations) — structs already emitted above;
+        # prototypes here allow struct methods to call free functions defined later
         # methods can call free functions defined later in the file
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
@@ -1409,11 +1415,6 @@ class Compiler(StmtMixin, ExprMixin):
                 if proto:
                     self.emit(f"{proto};")
         self.emit("")
-
-        # Emit structs
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef) and node.name in self.structs:
-                self.compile_struct(node)
 
         # Emit struct-element typed list implementations (after structs are defined)
         for elem_t, list_name in self.typed_lists.items():
