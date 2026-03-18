@@ -298,7 +298,7 @@ class Compiler(StmtMixin, ExprMixin):
             fname = f"{prefix}{node.name}" if prefix else node.name
             self.func_alloc_tags[fname] = frozenset(tags)
 
-        # Top-level functions
+        # Top-level functions — pass 1: tag based on direct alloc() / free()
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
                 _tag_func(node)
@@ -308,6 +308,56 @@ class Compiler(StmtMixin, ExprMixin):
                     for item in node.body:
                         if isinstance(item, ast.FunctionDef):
                             _tag_func(item, prefix=f"{node.name}_")
+
+        # Pass 2: propagate Producer one more hop (depth-2 cap).
+        # A function that returns a value from a Producer-tagged call is also a Producer.
+        def _propagate_producer_tag(node: ast.FunctionDef, prefix: str = "") -> None:
+            fname = f"{prefix}{node.name}" if prefix else node.name
+            if "producer" in self.func_alloc_tags.get(fname, frozenset()):
+                return  # already tagged — nothing to propagate
+            # Locals assigned from Producer-tagged calls in this body
+            producer_locals: set = set()
+            for child in ast.walk(node):
+                if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                    if (child.value and isinstance(child.value, ast.Call)
+                            and isinstance(child.value.func, ast.Name)
+                            and "producer" in self.func_alloc_tags.get(
+                                child.value.func.id, frozenset())):
+                        producer_locals.add(child.target.id)
+                elif isinstance(child, ast.Assign):
+                    for t in child.targets:
+                        if isinstance(t, ast.Name):
+                            if (isinstance(child.value, ast.Call)
+                                    and isinstance(child.value.func, ast.Name)
+                                    and "producer" in self.func_alloc_tags.get(
+                                        child.value.func.id, frozenset())):
+                                producer_locals.add(t.id)
+            # If any return gives back a Producer-call result or a Producer local, tag self
+            for child in ast.walk(node):
+                if isinstance(child, ast.Return) and child.value:
+                    ret = child.value
+                    if (isinstance(ret, ast.Call) and isinstance(ret.func, ast.Name)
+                            and "producer" in self.func_alloc_tags.get(
+                                ret.func.id, frozenset())):
+                        tags = set(self.func_alloc_tags.get(fname, frozenset()))
+                        tags.add("producer")
+                        self.func_alloc_tags[fname] = frozenset(tags)
+                        return
+                    if isinstance(ret, ast.Name) and ret.id in producer_locals:
+                        tags = set(self.func_alloc_tags.get(fname, frozenset()))
+                        tags.add("producer")
+                        self.func_alloc_tags[fname] = frozenset(tags)
+                        return
+
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef):
+                _propagate_producer_tag(node)
+            elif isinstance(node, ast.ClassDef):
+                decs = self.get_decorators(node)
+                if "trait" not in decs and not self._is_enum_class(node):
+                    for item in node.body:
+                        if isinstance(item, ast.FunctionDef):
+                            _propagate_producer_tag(item, prefix=f"{node.name}_")
 
     # -------------------------------------------------------------------
     # Static leak detection
@@ -333,9 +383,14 @@ class Compiler(StmtMixin, ExprMixin):
         classify = self._escape_classify(func_node)
         skip_vars = {v for v, st in classify.items() if st in ("local_only", "escaping")}
 
-        def warn_leak(lineno: int, var: str, alloc_line: int) -> None:
+        def warn_leak(lineno: int, var: str, alloc_info) -> None:
+            alloc_line, producer = alloc_info
+            if producer:
+                origin = f"returned by '{producer}' at line {alloc_line}"
+            else:
+                origin = f"allocated at line {alloc_line}"
             print(
-                f"{filepath}:{lineno}: warning: '{var}' allocated at line {alloc_line}"
+                f"{filepath}:{lineno}: warning: '{var}' {origin}"
                 f" may not be freed on this path",
                 file=sys.stderr,
             )
@@ -352,14 +407,19 @@ class Compiler(StmtMixin, ExprMixin):
                 file=sys.stderr,
             )
 
-        def is_owned_rhs(call_node) -> bool:
-            """True if a call allocates memory the caller must manage."""
+        def producer_of(call_node):
+            """If call transfers ownership to caller, return (True, producer_fname).
+            producer_fname is None for direct alloc(), or the function name for Producer calls.
+            Returns (False, None) if the call does not transfer ownership."""
             if not (isinstance(call_node, ast.Call)
                     and isinstance(call_node.func, ast.Name)):
-                return False
+                return False, None
             fname = call_node.func.id
-            return (fname in _ALLOC_FUNCS
-                    or "producer" in self.func_alloc_tags.get(fname, frozenset()))
+            if fname in _ALLOC_FUNCS:
+                return True, None
+            if "producer" in self.func_alloc_tags.get(fname, frozenset()):
+                return True, fname
+            return False, None
 
         def check_expr_for_uaf(expr, freed: dict, lineno: int) -> None:
             """Warn if any freed variable appears in an expression."""
@@ -425,8 +485,9 @@ class Compiler(StmtMixin, ExprMixin):
                         discharge(stmt.value, live, freed)
                     else:
                         check_expr_for_uaf(stmt.value, freed, lineno)
-                    if name not in skip_vars and is_owned_rhs(stmt.value):
-                        live[name] = lineno
+                    owned, pname = producer_of(stmt.value)
+                    if name not in skip_vars and owned:
+                        live[name] = (lineno, pname)
                 return live, freed
 
             # x = alloc(...) or x = producer()
@@ -436,9 +497,9 @@ class Compiler(StmtMixin, ExprMixin):
                 else:
                     check_expr_for_uaf(stmt.value, freed, lineno)
                 for t in stmt.targets:
-                    if isinstance(t, ast.Name) and t.id not in skip_vars:
-                        if is_owned_rhs(stmt.value):
-                            live[t.id] = lineno
+                    owned, pname = producer_of(stmt.value)
+                    if isinstance(t, ast.Name) and t.id not in skip_vars and owned:
+                        live[t.id] = (lineno, pname)
                 return live, freed
 
             # Bare call expression: free(x), consume(x)
@@ -453,15 +514,15 @@ class Compiler(StmtMixin, ExprMixin):
                             else None)
                 if stmt.value:
                     check_expr_for_uaf(stmt.value, freed, lineno)
-                for var, alloc_line in live.items():
+                for var, alloc_info in live.items():
                     if var != returned:
-                        warn_leak(lineno, var, alloc_line)
+                        warn_leak(lineno, var, alloc_info)
                 return None  # path exits
 
             # raise — warn about all live vars
             if isinstance(stmt, ast.Raise):
-                for var, alloc_line in live.items():
-                    warn_leak(lineno, var, alloc_line)
+                for var, alloc_info in live.items():
+                    warn_leak(lineno, var, alloc_info)
                 return None  # path exits
 
             # if / else — fork, recurse, merge surviving sets
@@ -507,8 +568,8 @@ class Compiler(StmtMixin, ExprMixin):
         if final:
             live, _freed = final
             end_line = getattr(func_node, "end_lineno", func_node.lineno)
-            for var, alloc_line in live.items():
-                warn_leak(end_line, var, alloc_line)
+            for var, alloc_info in live.items():
+                warn_leak(end_line, var, alloc_info)
 
     # -------------------------------------------------------------------
     # Type inference

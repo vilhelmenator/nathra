@@ -81,7 +81,7 @@ The correctness pass costs nothing at runtime; all of it is compile-time analysi
 
 ### Interprocedural ownership *(depth-capped, built on function tags)*
 
-- [ ] **Cross-function ownership chain analysis**
+- [x] **Cross-function ownership chain analysis**
   Second pass over each function body. At every call site: did this variable receive
   its value from a *Producer*? If so, is ownership discharged on every path (passed
   to a *Consumer*, returned, or stored)? If not — leak warning, annotated with both
