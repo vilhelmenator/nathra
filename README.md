@@ -890,6 +890,8 @@ def process(arr: ptr[int], n: int) -> int:
 
 ## Benchmark
 
+### Python vs micropy
+
 `bench/bench.mpy` is a dual-mode file that runs as plain Python and compiles with micropy. `bench/run.py` builds the binary with `-O2`, runs both, and prints a comparison:
 
 ```
@@ -901,11 +903,31 @@ int_sum                     1215           7      173x
 fib_36                      4868         112       43x
 ```
 
-Run it:
-
 ```sh
 cd bench
 python3 run.py
+```
+
+### Compiler optimizations vs naive C
+
+`bench/run_opts.py` builds three versions of the same algorithms — Python, hand-written idiomatic C, and micropy — and prints a side-by-side comparison. It demonstrates four automatic micropy optimizations:
+
+```
+benchmark              python ms  naive C ms  micropy ms   speedup  optimization
+--------------------  ----------  ----------  ----------  --------  ----------------------------------------
+saxpy                      23400         132         141      0.9x  restrict → no aliasing-check prelude
+strided_sum                 5080          93          96      1.0x  constant specialisation (stride=4 folded in)
+small_alloc                49250         213          38      5.6x  alloca substitution (no malloc/free per call)
+soa_sum                    24000         119          30      4.0x  @soa → 8B/elem read vs 64B/elem AoS (8-field struct)
+```
+
+- **saxpy / strided_sum** — Apple Clang at `-O2 -march=native` already applies runtime aliasing checks and constant propagation that match micropy's restrict/specialisation output on this target; speedup is architecture-dependent and more visible on older x86 toolchains.
+- **small_alloc** — `alloca` substitution is a real win everywhere: stack allocation costs ~1 ns (one `sub rsp` instruction) vs 30–100 ns for `malloc/free` on typical allocators. 5.6× with 5 M calls to a 512-byte scratch-buffer function.
+- **soa_sum** — the `@soa` benchmark extracts one field from a particle array (8 fields, 64 B/particle). AoS loads a full 64-byte cache line to get 8 B of `.x`; SoA reads only the `particles_x[]` stream (8 B/element). 4× speedup at 5 M particles, `@noinline` on both sides to prevent the optimizer from collapsing the rep loop.
+
+```sh
+cd bench
+python3 run_opts.py
 ```
 
 ## Generated header rules
@@ -930,5 +952,8 @@ This means including a micropy module header in C++ or C code never silently pul
 | `micropy_rt.h`     | Full runtime: strings, lists, dicts, I/O, concurrency, … |
 | `micropy_test.h`   | Test runner infrastructure               |
 | `micropy.py`       | IDE stubs — add `from micropy import *` to suppress linter warnings |
-| `bench/bench.mpy`  | Benchmark suite (runs as Python or compiled micropy) |
-| `bench/run.py`     | Build + run benchmark, print speedup table |
+| `bench/bench.mpy`        | Basic benchmark suite (Python vs micropy)                   |
+| `bench/run.py`           | Build + run basic benchmark, print speedup table            |
+| `bench/bench_opts.mpy`   | Optimization contrast benchmark (Python + micropy)          |
+| `bench/bench_opts_naive.c` | Same algorithms in idiomatic C without micropy optimizations |
+| `bench/run_opts.py`      | Build + run all three variants, print 4-column comparison   |
