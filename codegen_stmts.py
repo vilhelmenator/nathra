@@ -381,6 +381,16 @@ class StmtMixin:
             var for var, status in self._escape_classify(node).items()
             if status == "local_only"
         }
+        # Prewarm @compile_time static arrays referenced in this function body
+        if self._compile_time_arrays:
+            _prewarmed = set()
+            for _stmt in node.body:
+                for _n in ast.walk(_stmt):
+                    if (isinstance(_n, ast.Name)
+                            and _n.id in self._compile_time_arrays
+                            and _n.id not in _prewarmed):
+                        self.emit(f"MP_PREFETCH(&{_n.id}[0], 0, 1);")
+                        _prewarmed.add(_n.id)
         for stmt in node.body:
             self.compile_stmt(stmt)
 
@@ -1190,6 +1200,22 @@ class StmtMixin:
     # Match statement
     # -------------------------------------------------------------------
 
+    def _arm_is_cold(self, case) -> bool:
+        """True if this match arm is a cold path (single raise or call to @cold func)."""
+        body = case.body
+        if len(body) != 1:
+            return False
+        stmt = body[0]
+        if isinstance(stmt, ast.Raise):
+            return True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            if isinstance(call.func, ast.Name):
+                return call.func.id in self._cold_funcs
+            if isinstance(call.func, ast.Attribute):
+                return call.func.attr in self._cold_funcs
+        return False
+
     def _pattern_is_int_const(self, pattern) -> bool:
         """True if pattern can be expressed as a C switch case label."""
         if isinstance(pattern, ast.MatchValue):
@@ -1260,6 +1286,16 @@ class StmtMixin:
         self.emit("}")
 
     def _compile_match_ifelse(self, subject: str, cases: list):
+        # Reorder: cold arms (single raise / @cold call) go last, before any wildcard
+        def _is_unconditional(c):
+            p = c.pattern
+            return isinstance(p, ast.MatchAs) and c.guard is None
+        _unconditional = [c for c in cases if _is_unconditional(c)]
+        _conditional   = [c for c in cases if not _is_unconditional(c)]
+        _cold_arms     = [c for c in _conditional if self._arm_is_cold(c)]
+        _warm_arms     = [c for c in _conditional if not self._arm_is_cold(c)]
+        cases = _warm_arms + _cold_arms + _unconditional
+
         # Hoist capture variables so they're available in guards and bodies
         hoisted: set = set()
         for case in cases:

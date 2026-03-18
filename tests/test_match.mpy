@@ -86,3 +86,16 @@ def test_match_no_default_falls_through() -> void:
         case 2:
             result = 2
     test_assert(result == 42)
+
+
+@test
+def test_match_cold_arm_ordering() -> void:
+    # raise arm reordered to end of if/else chain (guards force if/else path)
+    x: int = 2
+    result: int = 0
+    match x:
+        case n if n == 1:
+            raise "unexpected"
+        case n if n == 2:
+            result = 99
+    test_assert(result == 99)

@@ -128,7 +128,7 @@ Items marked ✅ are already implemented.
   and instruction reordering it would otherwise refuse. Detection is a single AST
   walk. Highest value item in this section.
 
-- [ ] **Match/case cold-arm ordering**
+- [x] **Match/case cold-arm ordering**
   When emitting the `if/else if` chain for a `match`, sort arms so any arm whose
   body is a single `raise` or calls a `@cold` function goes last. Direct extension
   of the guard-raise logic.
@@ -139,7 +139,7 @@ Items marked ✅ are already implemented.
   auto-coerce to stack compound literals. `str_new` still works for runtime `cstr`
   values. Removes `str_new("literal")` boilerplate from idiomatic code.
 
-- [ ] **`@compile_time` array prewarm**
+- [x] **`@compile_time` array prewarm**
   When a `@compile_time`-generated array is referenced in a function body, emit
   `MP_PREFETCH` for its first cache line at function entry. The array is a known
   static address — zero guesswork.

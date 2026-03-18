@@ -59,6 +59,8 @@ class Compiler(StmtMixin, ExprMixin):
     platform: str = "all"  # "windows", "linux", "macos", "all"
     source_dir: str = ""
     _compile_time_funcs: set = field(default_factory=set)  # names of @compile_time functions
+    _compile_time_arrays: set = field(default_factory=set) # names of @compile_time static arrays
+    _cold_funcs: set = field(default_factory=set)          # names of @cold-decorated functions
 
     thread_wrappers_emitted: set = field(default_factory=set)
     current_func_ret_type: str = "void"
@@ -900,6 +902,8 @@ class Compiler(StmtMixin, ExprMixin):
                 self.func_ret_types[node.name] = ret_type
                 self.func_param_order[node.name] = [a.arg for a in node.args.args]
                 self.func_param_types[node.name] = [map_type(a.annotation) for a in node.args.args]
+                if "cold" in decs:
+                    self._cold_funcs.add(node.name)
 
                 # Collect default parameter values (right-aligned in ast.arguments.defaults)
                 n_args = len(node.args.args)
@@ -1527,6 +1531,7 @@ class Compiler(StmtMixin, ExprMixin):
                                 vals = ", ".join(str(v) for v in result)
                                 self.emit(f"const int64_t {name}[] = {{{vals}}};")
                                 self.emit(f"const int64_t {name}_len = {len(result)};")
+                            self._compile_time_arrays.add(name)
                         elif isinstance(result, (int, float)):
                             self.emit(f"const {ctype} {name} = {result};")
                         self.emit("")
