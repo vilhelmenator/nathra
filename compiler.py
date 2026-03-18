@@ -123,6 +123,8 @@ class Compiler(StmtMixin, ExprMixin):
     _str_literal_vars: set = field(default_factory=set)  # locals init'd from string literal (stack MpStr, no malloc)
     _arena_batched_vars: dict = field(default_factory=dict)  # varname → arena batch info for current function
     _arena_batch_meta: dict = field(default_factory=dict)    # arena_name → batch metadata for current function
+    _in_stream_func: bool = False     # current function has @stream — subscript writes → non-temporal stores
+    _stream_loop_active: bool = False # inside a @stream for-range loop body right now
     debug_mode: bool = False                             # emit allocation tracking (--debug)
 
     def emit(self, line=""):
@@ -1405,46 +1407,74 @@ class Compiler(StmtMixin, ExprMixin):
             for tname in trait_names:
                 self._verify_trait(sname, tname, tree)
 
-        # Emit functions
+        # Emit functions — in topological order (callees before callers).
+        # Prototypes already emitted above handle mutual recursion.
+        _emit_funcs = []
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
                 decs = self.get_decorators(node)
-
-                if "extern" in decs:
+                if any(d in decs for d in ("extern", "compile_time", "trait")):
                     continue
+                _emit_funcs.append(node)
 
-                if "compile_time" in decs:
+        # Build call graph: fname → set of module-function names it calls
+        _mod_names = {n.name for n in _emit_funcs}
+        _call_graph = {}
+        for _fn in _emit_funcs:
+            _edges = set()
+            for _stmt in _fn.body:
+                for _nd in ast.walk(_stmt):
+                    if (isinstance(_nd, ast.Call)
+                            and isinstance(_nd.func, ast.Name)
+                            and _nd.func.id in _mod_names
+                            and _nd.func.id != _fn.name):
+                        _edges.add(_nd.func.id)
+            _call_graph[_fn.name] = _edges
+
+        # Topological sort via DFS post-order: callee before caller
+        _topo_visited: set = set()
+        _topo_result: list = []
+        def _topo_dfs(name: str) -> None:
+            if name in _topo_visited:
+                return
+            _topo_visited.add(name)
+            for dep in _call_graph.get(name, ()):
+                _topo_dfs(dep)
+            _topo_result.append(name)
+        for _fn in _emit_funcs:
+            _topo_dfs(_fn.name)
+
+        _fn_map = {n.name: n for n in _emit_funcs}
+        for _fname in _topo_result:
+            node = _fn_map[_fname]
+            decs = self.get_decorators(node)
+
+            if "generic" in decs:
+                self._emit_generic(node, decs, module_name)
+                continue
+
+            if "platform" in decs:
+                plat_info = decs["platform"]
+                plat = plat_info["args"][0] if plat_info.get("args") else "all"
+                if self.platform != "all" and plat != self.platform:
                     continue
+                self._emit_platform_func(node, plat, module_name)
+                continue
 
-                if "trait" in decs:
-                    continue
+            if "unroll" in decs:
+                self.compile_function_with_unroll(node, module_name, decs["unroll"])
+                continue
 
-                if "generic" in decs:
-                    self._emit_generic(node, decs, module_name)
-                    continue
+            if "parallel" in decs:
+                self._emit_parallel(node, decs["parallel"], module_name)
+                continue
 
-                if "platform" in decs:
-                    plat_info = decs["platform"]
-                    plat = plat_info["args"][0] if plat_info.get("args") else "all"
-                    if self.platform != "all" and plat != self.platform:
-                        continue
-                    self._emit_platform_func(node, plat, module_name)
-                    continue
-
-                if "unroll" in decs:
-                    self.compile_function_with_unroll(node, module_name, decs["unroll"])
-                    continue
-
-                if "parallel" in decs:
-                    self._emit_parallel(node, decs["parallel"], module_name)
-                    continue
-
-                if "test" in decs:
-                    self.compile_function(node, module_name)
-                    self._emit_test_wrapper(node.name)
-                    continue
-
+            if "test" in decs:
                 self.compile_function(node, module_name)
+                self._emit_test_wrapper(node.name)
+                continue
+
+            self.compile_function(node, module_name)
 
         # Emit test main() if we have @test functions and no explicit main
         if self.test_funcs and "main" not in mod_info.functions:

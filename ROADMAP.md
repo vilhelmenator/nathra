@@ -177,25 +177,25 @@ Items marked ✅ are already implemented.
   `is_err(...)` blocks) — auto-annotate `__attribute__((cold))`. Higher value than
   body inference; catches helper functions that look normal in isolation.
 
-- [ ] **Stack variable lifetime narrowing**
+- [x] **Stack variable lifetime narrowing**
   Track first and last statement index for each large local. If it is never
   address-taken and its lifetime doesn't overlap another large local, wrap it in a
   `{ }` scope so the C compiler knows the stack slot can be reused. MicroPy knows
   whether `&var` is ever taken; C compilers must conservatively assume it might be.
 
-- [ ] **Linked-list / tree traversal prefetch**
+- [x] **Linked-list / tree traversal prefetch**
   Detect `while node is not None: ... node = node.next` patterns. Emit
   `MP_PREFETCH(node->next->next, 0, 1)` at the top of each iteration. Pointer-chase
   latency is the dominant cost in tree traversals.
 
-- [ ] **Function ordering (topological sort)**
+- [x] **Function ordering (topological sort)**
   Emit functions in call-graph order so each callee appears before its callers.
   Removes the need for forward declarations and gives the inliner the best possible
   view. Requires per-function emit buffering and a topological sort of the call graph.
 
 ### High complexity — defer until above is stable
 
-- [ ] **Non-temporal prefetch for single-pass streaming loops**
+- [x] **Non-temporal prefetch for single-pass streaming loops**
   Loops that write every element exactly once and never re-read → `_mm_stream`
   / `__builtin_ia32_movntdq`. Bypasses cache entirely, avoids evicting hot data.
   Requires recognizing the write-only streaming pattern.
@@ -211,7 +211,7 @@ Items marked ✅ are already implemented.
   entirely. Cross-function transformation — only item here that mutates function
   signatures and requires coordinated changes across modules.
 
-- [ ] **Struct field sparsity warning**
+- [x] **Struct field sparsity warning**
   At struct definition time, compute the natural layout and warn if field ordering
   would leave gaps larger than a cache line. Suggest a reordered layout.
 

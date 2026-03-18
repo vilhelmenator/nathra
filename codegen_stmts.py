@@ -15,6 +15,53 @@ _WIDE_INT_TYPES = frozenset({"int64_t", "int", "uint64_t"})
 _ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
 _FREE_FUNCS  = frozenset({"free",  "mp_free"})
 
+# Scalar/small types that should NOT be lifetime-scoped (stack slot reuse is
+# already handled by the C compiler's register allocator for these).
+_SMALL_CTYPES = frozenset({
+    "int64_t", "int32_t", "uint32_t", "int16_t", "uint16_t",
+    "int8_t",  "uint8_t", "double",   "float",   "bool",
+    "char",    "void",    "int",      "uint64_t", "size_t",
+    "ptrdiff_t", "MpVal",
+})
+
+# ── Struct field layout helpers (used by sparsity warning) ──────────────────
+
+_SCALAR_ALIGN_SIZE = {
+    "double":    (8, 8), "int64_t":  (8, 8), "uint64_t":  (8, 8),
+    "ptrdiff_t": (8, 8), "size_t":   (8, 8), "MpVal":     (8, 8),
+    "int32_t":   (4, 4), "uint32_t": (4, 4), "float":     (4, 4), "int": (4, 4),
+    "int16_t":   (2, 2), "uint16_t": (2, 2),
+    "int8_t":    (1, 1), "uint8_t":  (1, 1), "bool":      (1, 1), "char": (1, 1),
+}
+
+def _field_align_size(ctype: str, structs: dict):
+    """Return (alignment, size) in bytes for ctype, or None if unknown."""
+    if not ctype or ctype in ("__array__", "__funcptr__", "__vec__", "__typed_list__"):
+        return None
+    if ctype.endswith("*"):
+        return (8, 8)
+    if ctype in _SCALAR_ALIGN_SIZE:
+        return _SCALAR_ALIGN_SIZE[ctype]
+    if ctype in structs:
+        return _struct_align_size(structs[ctype], structs)
+    return None
+
+def _struct_align_size(fields: list, structs: dict):
+    """Return (alignment, total_size) for a struct with fields in the given order, or None."""
+    offset    = 0
+    max_align = 1
+    for _fn, ctype in fields:
+        info = _field_align_size(ctype, structs)
+        if info is None:
+            return None
+        align, size = info
+        max_align = max(max_align, align)
+        offset = (offset + align - 1) & ~(align - 1)   # pad to alignment
+        offset += size
+    if max_align > 1:
+        offset = (offset + max_align - 1) & ~(max_align - 1)  # trailing pad
+    return (max_align, offset)
+
 
 def _ptr_is_written(body, param_name: str, func_param_types: dict = None) -> bool:
     """Return True if param_name is ever written through in body.
@@ -156,6 +203,37 @@ class StmtMixin:
         self.indent -= 1
         self.emit(f"}}{attr_str} {node.name};")
         self.emit("")
+
+        # Struct field sparsity warning — skip packed structs, unions, and
+        # structs whose fields include bitfields, arrays, or funcptrs (layout
+        # is either intentional or non-trivial to compute).
+        if not is_union and "packed" not in decs:
+            _warnfields = [(fn, ct) for fn, ct in fields
+                           if ct is not None
+                           and ct not in ("__array__", "__funcptr__", "__vec__")]
+            if len(_warnfields) >= 2:
+                _src_info = _struct_align_size(_warnfields, self.structs)
+                if _src_info is not None:
+                    _, _src_sz = _src_info
+                    # Optimal order: largest alignment first, then largest size
+                    _opt = sorted(_warnfields,
+                                  key=lambda fc: _field_align_size(fc[1], self.structs) or (0, 0),
+                                  reverse=True)
+                    _opt_info = _struct_align_size(_opt, self.structs)
+                    if _opt_info is not None:
+                        _, _opt_sz = _opt_info
+                        _wasted = _src_sz - _opt_sz
+                        if _wasted > 0:
+                            import sys
+                            _loc = f"{self._current_file or '?'}:{node.lineno}"
+                            _sugg = ", ".join(f"{fn}: {ct}" for fn, ct in _opt)
+                            print(
+                                f"{_loc}: warning: struct '{node.name}' wastes "
+                                f"{_wasted} bytes of padding. "
+                                f"Suggested field order ({_opt_sz} vs {_src_sz} bytes): "
+                                f"{_sugg}",
+                                file=sys.stderr,
+                            )
 
         # Emit constructor helper for MSVC compatibility
         # Skip array/funcptr fields (ct==None) — they can't be passed by value
@@ -360,7 +438,8 @@ class StmtMixin:
             attrs.append("cold")
         if "hot" in decs:
             attrs.append("hot")
-        self._in_simd_func = "simd" in decs
+        self._in_simd_func   = "simd"   in decs
+        self._in_stream_func = "stream" in decs
         qual_str = " ".join(qualifiers) + (" " if qualifiers else "")
         attr_str = f" __attribute__(({', '.join(attrs)}))" if attrs else ""
 
@@ -476,6 +555,69 @@ class StmtMixin:
                 self._arena_batched_vars[_vn] = {
                     "kind": "list_new", "arena": _an, "index": _i,
                 }
+        # Stack variable lifetime narrowing:
+        # Wrap large struct-value locals that are never address-taken in { } scopes
+        # so the C compiler knows the stack slot ends and can be reused.
+        # Only applies to user-defined struct values (not pointers, not primitives).
+        _lv_decls = {}  # varname → stmt_index
+        for _i, _stmt in enumerate(node.body):
+            if (isinstance(_stmt, ast.AnnAssign)
+                    and isinstance(_stmt.target, ast.Name)):
+                _vn  = _stmt.target.id
+                _vct = map_type(_stmt.annotation)
+                # Candidate: a user struct value — in self.structs, not a pointer
+                if (_vct in self.structs
+                        and not _vct.endswith("*")
+                        and _vct not in _SMALL_CTYPES):
+                    _lv_decls[_vn] = _i
+        # Remove address-taken vars: ref(var) anywhere in body
+        _addr_taken = set()
+        for _stmt in node.body:
+            for _nd in ast.walk(_stmt):
+                if (isinstance(_nd, ast.Call)
+                        and isinstance(_nd.func, ast.Name)
+                        and _nd.func.id == "ref"
+                        and _nd.args
+                        and isinstance(_nd.args[0], ast.Name)):
+                    _addr_taken.add(_nd.args[0].id)
+        # Find last-use index for each candidate, then filter out partial overlaps.
+        # Two lifetimes [d1,l1] and [d2,l2] partially overlap when they intersect
+        # but neither fully contains the other — this would produce non-nested { }
+        # that the C compiler rejects.  Only wrap variables whose lifetimes are
+        # either fully disjoint from, or fully contained within, every other candidate.
+        _cands = {}  # varname → (decl_idx, last_use_idx)
+        for _vn, _di in _lv_decls.items():
+            if _vn in _addr_taken:
+                continue
+            _last = _di
+            for _i, _stmt in enumerate(node.body):
+                if _i < _di:
+                    continue
+                for _nd in ast.walk(_stmt):
+                    if isinstance(_nd, ast.Name) and _nd.id == _vn:
+                        _last = _i
+                        break
+            _cands[_vn] = (_di, _last)
+        # Exclude any candidate that partially overlaps another candidate
+        _excl = set()
+        _clist = list(_cands.items())
+        for _ia, (_vna, (_d1, _l1)) in enumerate(_clist):
+            for _ib, (_vnb, (_d2, _l2)) in enumerate(_clist):
+                if _ia >= _ib:
+                    continue
+                _overlaps     = _d1 <= _l2 and _d2 <= _l1
+                _a_contains_b = _d1 <= _d2 and _l2 <= _l1
+                _b_contains_a = _d2 <= _d1 and _l1 <= _l2
+                if _overlaps and not _a_contains_b and not _b_contains_a:
+                    _excl.add(_vna)
+                    _excl.add(_vnb)
+        _scope_open  = {}  # stmt_idx → [varname]  — emit "{" before this stmt
+        _scope_close = {}  # stmt_idx → [varname]  — emit "}" after this stmt
+        for _vn, (_di, _last) in _cands.items():
+            if _vn in _excl:
+                continue
+            _scope_open.setdefault(_di, []).append(_vn)
+            _scope_close.setdefault(_last, []).append(_vn)
         # Prewarm @compile_time static arrays referenced in this function body
         if self._compile_time_arrays:
             _prewarmed = set()
@@ -486,8 +628,18 @@ class StmtMixin:
                             and _n.id not in _prewarmed):
                         self.emit(f"MP_PREFETCH(&{_n.id}[0], 0, 1);")
                         _prewarmed.add(_n.id)
-        for stmt in node.body:
+        for _i, stmt in enumerate(node.body):
+            # Open { for struct-value locals declared at this statement
+            for _sv in _scope_open.get(_i, []):
+                self.emit("{")
+                self.indent += 1
             self.compile_stmt(stmt)
+            # Close } in reverse-open order (last opened, first closed)
+            _closers = sorted(_scope_close.get(_i, []),
+                               key=lambda v: _lv_decls.get(v, 0), reverse=True)
+            for _sv in _closers:
+                self.indent -= 1
+                self.emit("}")
 
         # Emit deferred calls at end of function (reverse order)
         if self.defer_stack:
@@ -510,7 +662,9 @@ class StmtMixin:
         self._merged_buf_name = ""
         self._arena_batched_vars = {}
         self._arena_batch_meta = {}
-        self._in_simd_func = False
+        self._in_simd_func   = False
+        self._in_stream_func = False
+        self._stream_loop_active = False
 
     # -------------------------------------------------------------------
     # Statements
@@ -760,6 +914,16 @@ class StmtMixin:
             self.emit(f"{ctype} {name};")
 
     def compile_assign(self, node: ast.Assign):
+        # @stream non-temporal store: arr[idx] = val → __builtin_nontemporal_store
+        if (getattr(self, '_stream_loop_active', False)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Subscript)):
+            _tgt = node.targets[0]
+            _arr = self.compile_expr(_tgt.value)
+            _idx = self.compile_expr(_tgt.slice)
+            _val = self.compile_expr(node.value)
+            self.emit(f"__builtin_nontemporal_store(({_val}), &({_arr})[{_idx}]);")
+            return
         # Tuple unpacking: a, b = func()  or  a, b = (x, y)
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Tuple):
             elts = node.targets[0].elts
@@ -1017,6 +1181,33 @@ class StmtMixin:
                 cond = f"{test_base}___bool__(&({self.compile_expr(node.test)}))"
         self.emit(f"while ({cond}) {{")
         self.indent += 1
+        # Linked-list / tree traversal prefetch:
+        # Pattern: while node is not None: ... node = node.field
+        # Emit MP_PREFETCH(node->field->field) at the top of each iteration.
+        _ll_var = None
+        _ll_field = None
+        if (isinstance(node.test, ast.Compare)
+                and len(node.test.ops) == 1
+                and isinstance(node.test.ops[0], ast.IsNot)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value is None
+                and isinstance(node.test.left, ast.Name)):
+            _lv = node.test.left.id
+            for _bstmt in node.body:
+                if (isinstance(_bstmt, ast.Assign)
+                        and len(_bstmt.targets) == 1
+                        and isinstance(_bstmt.targets[0], ast.Name)
+                        and _bstmt.targets[0].id == _lv
+                        and isinstance(_bstmt.value, ast.Attribute)
+                        and isinstance(_bstmt.value.value, ast.Name)
+                        and _bstmt.value.value.id == _lv):
+                    _ll_var   = _lv
+                    _ll_field = _bstmt.value.attr
+                    break
+        if _ll_var is not None:
+            self.emit(f"if ({_ll_var}->{_ll_field}) "
+                      f"MP_PREFETCH({_ll_var}->{_ll_field}->{_ll_field}, 0, 1);")
         for stmt in node.body:
             self.compile_stmt(stmt)
         self.indent -= 1
@@ -1239,10 +1430,20 @@ class StmtMixin:
                             except (ValueError, TypeError):
                                 pass
                         self.emit(f"MP_PREFETCH(&{_arr}[{_target_id} + 8], 0, 1);")
+                # @stream: subscript writes inside this loop become non-temporal stores
+                if self._in_stream_func:
+                    self._stream_loop_active = True
                 for stmt in node.body:
                     self.compile_stmt(stmt)
+                if self._in_stream_func:
+                    self._stream_loop_active = False
                 self.indent -= 1
                 self.emit("}")
+                # Flush non-temporal write buffer after streaming loop
+                if self._in_stream_func:
+                    self.emit("#if defined(__x86_64__) || defined(__i386__)")
+                    self.emit("__builtin_ia32_sfence();")
+                    self.emit("#endif")
                 return
 
         # Array/typed_list iteration: for x in arr:
