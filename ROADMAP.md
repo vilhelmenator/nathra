@@ -146,16 +146,16 @@ Items marked ✅ are already implemented.
 
 ### Requires escape analysis (build correctness primitive first)
 
-- [ ] **`alloca` substitution for small known-size allocations**
+- [x] **`alloca` substitution for small known-size allocations**
   `alloc(N)` where N is a compile-time constant ≤ 4 KB and the pointer is local-only
   → emit `alloca(N)`, drop the `free`. Zero heap overhead, zero fragmentation,
   automatic cleanup on return. Fires constantly for scratch buffers.
 
-- [ ] **Conditional `alloca`/`malloc` for bounded allocations**
+- [x] **Conditional `alloca`/`malloc` for bounded allocations**
   `alloc(n)` where n is a runtime value but is bounded by a known constant → emit
   `n <= 4096 ? alloca(n) : malloc(n)` with a matching conditional `free`.
 
-- [ ] **Allocation merging**
+- [x] **Allocation merging**
   Multiple `alloc` calls of known sizes in the same block scope, all local-only →
   single `alloca`/`malloc`, carved into named offsets. One allocation, one cache
   line, one free (or none if on the stack).

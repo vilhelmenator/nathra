@@ -381,6 +381,39 @@ class StmtMixin:
             var for var, status in self._escape_classify(node).items()
             if status == "local_only"
         }
+        # Allocation merging: collect top-level constant-size local-only allocs.
+        # If ≥ 2 found, emit one stack buffer and carve named offsets from it.
+        _merge_candidates = []
+        for _stmt in node.body:
+            if (isinstance(_stmt, ast.AnnAssign)
+                    and isinstance(_stmt.target, ast.Name)
+                    and _stmt.value
+                    and isinstance(_stmt.value, ast.Call)
+                    and isinstance(_stmt.value.func, ast.Name)
+                    and _stmt.value.func.id in _ALLOC_FUNCS
+                    and len(_stmt.value.args) == 1
+                    and isinstance(_stmt.value.args[0], ast.Constant)
+                    and isinstance(_stmt.value.args[0].value, int)
+                    and 0 < _stmt.value.args[0].value <= 4096
+                    and _stmt.target.id in self._auto_free_vars):
+                _merge_candidates.append((
+                    _stmt.target.id,
+                    map_type(_stmt.annotation),
+                    _stmt.value.args[0].value,
+                ))
+        if len(_merge_candidates) >= 2:
+            _total = 0
+            self._merged_alloc_offsets = {}
+            for _vname, _vctype, _vsize in _merge_candidates:
+                _total = (_total + 7) & ~7  # 8-byte align each slot
+                self._merged_alloc_offsets[_vname] = (_vctype, _total)
+                _total += _vsize
+            _total = (_total + 7) & ~7
+            self._merged_buf_name = f"_mrgd_{id(node) & 0xFFFF:04x}"
+            self.emit(f"char {self._merged_buf_name}[{_total}];")
+        else:
+            self._merged_alloc_offsets = {}
+            self._merged_buf_name = ""
         # Prewarm @compile_time static arrays referenced in this function body
         if self._compile_time_arrays:
             _prewarmed = set()
@@ -411,6 +444,8 @@ class StmtMixin:
         self._vec_vars = {}
         self._auto_free_vars = set()
         self._str_literal_vars = set()
+        self._merged_alloc_offsets = {}
+        self._merged_buf_name = ""
         self._in_simd_func = False
 
     # -------------------------------------------------------------------
@@ -594,10 +629,35 @@ class StmtMixin:
                 self.emit(f"MpStr* {name} = &_lit_{name};")
                 self._str_literal_vars.add(name)
                 return
+            # Escape-analysis alloc optimizations (local-only pointer, no escape)
+            if (name in self._auto_free_vars
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in _ALLOC_FUNCS
+                    and len(node.value.args) == 1):
+                _arg = node.value.args[0]
+                # Item 3: allocation merging — part of a merged stack buffer
+                if name in self._merged_alloc_offsets:
+                    _vctype, _off = self._merged_alloc_offsets[name]
+                    self.emit(f"{_vctype} {name} = ({_vctype})({self._merged_buf_name} + {_off});")
+                    return
+                # Item 1: alloca for compile-time constant size ≤ 4 KB
+                if (isinstance(_arg, ast.Constant)
+                        and isinstance(_arg.value, int)
+                        and 0 < _arg.value <= 4096):
+                    self.emit(f"{ctype} {name} = alloca({_arg.value});")
+                    return
+                # Item 2: conditional alloca/malloc for runtime-bounded size
+                _sz = f"_sz_{name}"
+                _compiled_sz = self.compile_expr(_arg)
+                self.emit(f"int64_t {_sz} = {_compiled_sz};")
+                self.emit(f"{ctype} {name} = {_sz} <= 4096 ? ({ctype})alloca({_sz}) : ({ctype})malloc({_sz});")
+                self.defer_stack.append(f"if ({_sz} > 4096) free({name})")
+                return
             val = self.compile_expr(node.value)
             val = self._coerce(val, self.infer_type(node.value), ctype)
             self.emit(f"{ctype} {name} = {val};")
-            # Scope-based auto-free: if this is a local-only alloc, defer cleanup
+            # Scope-based auto-free: non-alloc producer calls (e.g. malloc wrappers)
             if (name in self._auto_free_vars
                     and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name)
