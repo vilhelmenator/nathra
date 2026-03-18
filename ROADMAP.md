@@ -133,9 +133,11 @@ Items marked ✅ are already implemented.
   body is a single `raise` or calls a `@cold` function goes last. Direct extension
   of the guard-raise logic.
 
-- [ ] **String literal stack optimization**
-  `str_new("literal")` where the variable never appears as the target of a mutating
-  `str_*` call → emit `const char*` directly. No heap allocation for temporary strings.
+- [x] **String literal stack optimization**
+  `s: str = "literal"` emits a block-scope `MpStr` struct on the stack — no `malloc`,
+  no `str_free` needed. String literals passed directly to `str_*` functions also
+  auto-coerce to stack compound literals. `str_new` still works for runtime `cstr`
+  values. Removes `str_new("literal")` boilerplate from idiomatic code.
 
 - [ ] **`@compile_time` array prewarm**
   When a `@compile_time`-generated array is referenced in a function body, emit

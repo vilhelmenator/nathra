@@ -83,3 +83,39 @@ def test_split() -> void:
 def test_str_format() -> void:
     s: str = str_format("x=%d y=%.1f", 7, 3.5)
     test_assert(s == str_new("x=7 y=3.5"))
+
+
+# ---- literal string syntax (s: str = "hello", no str_new needed) ----
+
+@test
+def test_str_literal_len() -> void:
+    s: str = "hello"
+    test_assert(str_len(s) == 5)
+
+
+@test
+def test_str_literal_eq() -> void:
+    a: str = "world"
+    b: str = str_new("world")
+    test_assert(str_eq(a, b))
+
+
+@test
+def test_str_literal_inline() -> void:
+    # string literal passed directly to str_* without assignment
+    test_assert(str_len("micropy") == 7)
+    test_assert(str_eq("abc", "abc"))
+
+
+@test
+def test_str_literal_upper() -> void:
+    s: str = "hello"
+    u: str = str_upper(s)
+    test_assert(str_eq(u, str_new("HELLO")))
+
+
+@test
+def test_str_literal_contains() -> void:
+    haystack: str = str_new("hello world")
+    test_assert(str_contains(haystack, "world"))
+    test_assert(not str_contains(haystack, "xyz"))

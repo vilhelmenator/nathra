@@ -89,6 +89,7 @@ class Compiler(StmtMixin, ExprMixin):
     _lambda_table: dict = field(default_factory=dict)  # id(ast.Lambda) → name
     func_alloc_tags: dict = field(default_factory=dict)  # fname → frozenset of "producer"|"consumer"|"borrows"|"stores"
     _auto_free_vars: set = field(default_factory=set)    # locals auto-deferred for free() in current function
+    _str_literal_vars: set = field(default_factory=set)  # locals init'd from string literal (stack MpStr, no malloc)
     debug_mode: bool = False                             # emit allocation tracking (--debug)
 
     def emit(self, line=""):

@@ -3,6 +3,15 @@ import sys
 
 from type_map import TYPE_MAP, mangle_type
 
+# str_* functions whose MpStr* arguments accept bare string literals via auto-coercion
+_STR_OBJ_FUNCS = frozenset({
+    "str_len", "str_eq", "str_concat", "str_free",
+    "str_contains", "str_starts_with", "str_ends_with",
+    "str_slice", "str_find", "str_upper", "str_lower",
+    "str_repeat", "str_strip", "str_lstrip", "str_rstrip",
+    "str_split", "print_str",
+})
+
 
 class ExprMixin:
     # -------------------------------------------------------------------
@@ -259,6 +268,18 @@ class ExprMixin:
         "fabs": "fabs", "hypot": "hypot", "fmod": "fmod",
         "isnan": "isnan", "isinf": "isinf",
     }
+
+    def _coerce_to_str_obj(self, arg_node, compiled: str) -> str:
+        """If arg_node is a string literal, wrap as a stack MpStr*; else return compiled as-is.
+
+        This is used for str_* function arguments: passing "hello" directly to str_len(),
+        str_eq(), etc. auto-produces a block-scope compound literal instead of a malloc.
+        """
+        if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
+            s = arg_node.value
+            escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            return f'(&(MpStr){{.data=(char*)"{escaped}",.len={len(s)}}})'
+        return compiled
 
     def compile_call(self, node: ast.Call) -> str:
         # Fill in default arguments for user-defined functions before compiling
@@ -539,6 +560,17 @@ class ExprMixin:
             # thread_spawn with auto-wrapping
             if fname == "thread_spawn" and len(node.args) >= 2:
                 return self._compile_thread_spawn(node)
+
+            # str_* functions: suppress str_free on literal vars; coerce string constants
+            # to stack MpStr* compound literals so "hello" works without str_new().
+            if fname in _STR_OBJ_FUNCS:
+                if fname == "str_free" and len(node.args) == 1:
+                    a = node.args[0]
+                    if isinstance(a, ast.Name) and a.id in self._str_literal_vars:
+                        return "((void)0)"
+                coerced = [self._coerce_to_str_obj(a, c)
+                           for a, c in zip(node.args, args)]
+                arg_str = ", ".join(coerced)
 
             # Built-in mappings
             builtins = {

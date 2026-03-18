@@ -369,6 +369,7 @@ class StmtMixin:
         self._list_vars = {}
         self._vec_vars = {}
         self._auto_free_vars = set()
+        self._str_literal_vars = set()
         self._in_simd_func = False
 
     # -------------------------------------------------------------------
@@ -407,9 +408,9 @@ class StmtMixin:
                 if node.value.func.id == "defer":
                     if node.value.args and isinstance(node.value.args[0], ast.Call):
                         inner = self.compile_expr(node.value.args[0])
-                        if hasattr(self, 'defer_stack'):
+                        if inner != "((void)0)" and hasattr(self, 'defer_stack'):
                             self.defer_stack.append(inner)
-                        self.emit(f"/* defer: {inner} */")
+                            self.emit(f"/* defer: {inner} */")
                         return
             # defer as a bare name calling a function: defer(list_free(nums))
             # already handled above. Also handle: defer(expr)
@@ -542,6 +543,16 @@ class StmtMixin:
             return
 
         if node.value:
+            # Literal string optimization: s: str = "hello" → stack MpStr, no malloc
+            if (ctype == "MpStr*"
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                s = node.value.value
+                escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                self.emit(f'MpStr _lit_{name} = {{.data=(char*)"{escaped}",.len={len(s)}}};')
+                self.emit(f"MpStr* {name} = &_lit_{name};")
+                self._str_literal_vars.add(name)
+                return
             val = self.compile_expr(node.value)
             val = self._coerce(val, self.infer_type(node.value), ctype)
             self.emit(f"{ctype} {name} = {val};")
