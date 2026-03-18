@@ -51,4 +51,11 @@ typedef struct MpThread     MpThread;
 typedef struct MpMutex      MpMutex;
 typedef struct MpCond       MpCond;
 
+/* Debug allocation counter — referenced by micropy_rt.h debug wrappers.
+ * The definition lives in the main translation unit (emitted by the compiler
+ * when --debug is active). */
+#ifdef MICROPY_DEBUG
+extern volatile long long _mp_alloc_count;
+#endif
+
 #endif /* MICROPY_TYPES_H */

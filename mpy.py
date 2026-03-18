@@ -42,6 +42,7 @@ def build_once(args, source_dir) -> bool:
         source_dir=source_dir,
         platform=args.platform,
         emit_line_directives=not getattr(args, 'no_line_directives', False),
+        debug_mode=getattr(args, 'debug', False),
     )
     try:
         c_src, h_src, mod_info = compiler.compile_file(args.source, "__main__")
@@ -84,6 +85,8 @@ def build_once(args, source_dir) -> bool:
 
     is_msvc = args.cc in ("cl", "cl.exe")
     extra_flags = shlex.split(getattr(args, 'flags', '') or '')
+    if getattr(args, 'debug', False):
+        extra_flags = ["-DMICROPY_DEBUG"] + extra_flags
     if getattr(args, 'shared', False):
         if is_msvc:
             cmd = [args.cc] + c_files + [f"/Fe{out_name}", "/nologo", "/Z7", "/LD"] + extra_flags
@@ -139,6 +142,9 @@ def main():
                         help='Extra flags passed to the C compiler/linker, quoted: --flags="-O2 -lssl"')
     parser.add_argument("--no-line-directives", action="store_true",
                         help="Omit #line directives from emitted C (cleaner output for diffing)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable allocation tracking: wraps alloc/free with counters, "
+                             "asserts zero live allocations at exit")
     args = parser.parse_args()
 
     # Route build.mpy to the build system

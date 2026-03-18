@@ -33,6 +33,51 @@ struct MpStr {
     int64_t len;
 };
 
+/* -------------------------------------------------------------------------
+ * Debug allocation tracking — active only when compiled with -DMICROPY_DEBUG.
+ *
+ * Every malloc/free call in the program (including runtime internals) is
+ * routed through the wrappers below, which increment/decrement a shared
+ * counter and print a trace line to stderr.
+ *
+ * The counter is defined once in the main translation unit by the compiler
+ * when --debug is set.  At program exit an atexit-registered function asserts
+ * the counter is zero, confirming no allocations leaked.
+ *
+ * Important: the wrapper function bodies are written before the #define
+ * macros, so they call the REAL libc malloc/free — no recursion.
+ * ------------------------------------------------------------------------- */
+#ifdef MICROPY_DEBUG
+static inline void* _mp_debug_alloc(size_t n, const char* file, int line) {
+    void* p = malloc(n);
+    if (p) {
+        _mp_alloc_count++;
+        fprintf(stderr, "[alloc +%lld]  %s:%d\n",
+                (long long)_mp_alloc_count, file, line);
+    }
+    return p;
+}
+static inline void _mp_debug_free(void* p, const char* file, int line) {
+    if (!p) return;
+    _mp_alloc_count--;
+    fprintf(stderr, "[free   %lld]  %s:%d\n",
+            (long long)_mp_alloc_count, file, line);
+    free(p);
+}
+static inline void _mp_alloc_assert_zero(void) {
+    if (_mp_alloc_count != 0)
+        fprintf(stderr, "\n[MEMORY] LEAK: %lld live allocation(s) at exit\n",
+                (long long)_mp_alloc_count);
+    else
+        fprintf(stderr, "\n[MEMORY] OK — all allocations freed\n");
+}
+/* Override malloc/free — must come AFTER the wrapper definitions above */
+#  define malloc(n)  _mp_debug_alloc((n), __FILE__, __LINE__)
+#  define free(p)    _mp_debug_free((p),  __FILE__, __LINE__)
+#else
+#  define _mp_alloc_assert_zero() ((void)0)
+#endif
+
 static inline MpVal mp_val_int(int64_t v) { MpVal r; memcpy(&r, &v, 8); return r; }
 static inline MpVal mp_val_float(double v) { MpVal r; memcpy(&r, &v, 8); return r; }
 static inline int64_t mp_as_int(MpVal v) { int64_t r; memcpy(&r, &v, 8); return r; }

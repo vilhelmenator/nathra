@@ -89,6 +89,7 @@ class Compiler(StmtMixin, ExprMixin):
     _lambda_table: dict = field(default_factory=dict)  # id(ast.Lambda) → name
     func_alloc_tags: dict = field(default_factory=dict)  # fname → frozenset of "producer"|"consumer"|"borrows"|"stores"
     _auto_free_vars: set = field(default_factory=set)    # locals auto-deferred for free() in current function
+    debug_mode: bool = False                             # emit allocation tracking (--debug)
 
     def emit(self, line=""):
         prefix = "    " * self.indent
@@ -1075,6 +1076,16 @@ class Compiler(StmtMixin, ExprMixin):
             for imp in self.imports:
                 self.emit(f'#include "{imp}.h"')
         self.emit("")
+
+        # Debug mode: define the shared alloc counter and register exit check
+        if self.debug_mode and module_name == "__main__":
+            self.emit("#ifdef MICROPY_DEBUG")
+            self.emit("volatile long long _mp_alloc_count = 0;")
+            self.emit("__attribute__((constructor)) static void _mp_debug_init(void) {")
+            self.emit("    atexit(_mp_alloc_assert_zero);")
+            self.emit("}")
+            self.emit("#endif")
+            self.emit("")
 
         # Emit scalar typed list implementations (before structs)
         for elem_t, list_name in self.typed_lists.items():

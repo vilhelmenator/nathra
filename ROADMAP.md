@@ -46,7 +46,7 @@ The correctness pass costs nothing at runtime; all of it is compile-time analysi
   Rust's drop glue prevents; MicroPy does it as a codegen pass with no language
   changes.
 
-- [ ] **Debug-mode allocation tracking** *(`--debug` flag)*
+- [x] **Debug-mode allocation tracking** *(`--debug` flag)*
   Wrap every `alloc` and `free` site with a counter increment/decrement and source
   location string. Assert the counter is zero at program exit. Zero cost in release
   builds. With function tags available, diagnostics can say *"pointer allocated in
