@@ -132,6 +132,8 @@ class Compiler(StmtMixin, ExprMixin):
     debug_mode: bool = False                             # emit allocation tracking (--debug)
     serializable_structs: set = field(default_factory=set)   # struct names with @serializable
     backref_fields: set = field(default_factory=set)         # (struct_name, field_name) pairs
+    codegen_hooks: dict = field(default_factory=dict)        # func_name → (module_path, hook_name, args, kwargs)
+    _py_imports: set = field(default_factory=set)            # module names imported from .py files
 
     def emit(self, line=""):
         prefix = "    " * self.indent
@@ -1524,6 +1526,14 @@ class Compiler(StmtMixin, ExprMixin):
                 self._emit_test_wrapper(node.name)
                 continue
 
+            # Check for codegen hook decorators (imported from .py files)
+            hook_info = self._find_codegen_hook(decs)
+            if hook_info:
+                line_before = len(self.lines)
+                self.compile_function(node, module_name)
+                self._apply_codegen_hook(node, hook_info, line_before)
+                continue
+
             self.compile_function(node, module_name)
 
         # Emit test main() if we have @test functions and no explicit main
@@ -2509,6 +2519,16 @@ class Compiler(StmtMixin, ExprMixin):
                 # math functions resolve directly; just skip the module import
             return
         if mod_name not in self.compiled_files:
+            # Check if this is a .py file (codegen hook module) rather than .mpy
+            py_path = os.path.join(self.source_dir, f"{mod_name}.py")
+            mpy_path = os.path.join(self.source_dir, f"{mod_name}.mpy")
+            if os.path.exists(py_path) and not os.path.exists(mpy_path):
+                # .py module — record as hook source, don't compile as .mpy
+                self._py_imports.add(mod_name)
+                for alias in node.names:
+                    local_name = alias.asname if alias.asname else alias.name
+                    self.from_imports[local_name] = (mod_name, alias.name)
+                return
             self.compile_dependency(mod_name)
         self.imports.append(mod_name)
         for alias in node.names:
@@ -2542,6 +2562,51 @@ class Compiler(StmtMixin, ExprMixin):
             f.write(c_src)
         with open(os.path.join(out_dir, f"{mod_name}.h"), "w") as f:
             f.write(h_src)
+
+    def _find_codegen_hook(self, decs: dict):
+        """Check if any decorator was imported from a .py file (codegen hook)."""
+        for dec_name, dec_info in decs.items():
+            if dec_name in self.from_imports:
+                mod_name, orig_name = self.from_imports[dec_name]
+                if mod_name in self._py_imports:
+                    args = dec_info.get("args", []) if isinstance(dec_info, dict) else []
+                    kwargs = dec_info.get("kwargs", {}) if isinstance(dec_info, dict) else {}
+                    return (mod_name, orig_name, args, kwargs)
+        return None
+
+    def _apply_codegen_hook(self, node, hook_info, line_before):
+        """Invoke a codegen hook on the just-emitted function C code."""
+        mod_name, hook_func_name, hook_args, hook_kwargs = hook_info
+        # Extract the C code that was just emitted
+        c_body = "\n".join(self.lines[line_before:])
+        # Dynamically import the .py module
+        import importlib.util
+        py_path = os.path.join(self.source_dir, f"{mod_name}.py")
+        if not os.path.exists(py_path):
+            print(f"Error: codegen hook module not found: {py_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            spec = importlib.util.spec_from_file_location(mod_name, py_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            hook_factory = getattr(module, hook_func_name)
+            hook_func = hook_factory(*hook_args, **hook_kwargs)
+            # Build param list for the hook
+            params = []
+            for arg in node.args.args:
+                params.append((arg.arg, map_type(arg.annotation)))
+            ret_type = map_type(node.returns)
+            result = hook_func(node.name, params, ret_type, c_body)
+        except Exception as e:
+            import traceback
+            print(f"Error in codegen hook '{hook_func_name}' from {py_path}:", file=sys.stderr)
+            traceback.print_exc()
+            sys.exit(1)
+        if result is not None:
+            # Replace the emitted C with the hook's output
+            del self.lines[line_before:]
+            for line in result.split("\n"):
+                self.lines.append(line)
 
     def _make_prototype(self, node: ast.FunctionDef, module_name: str) -> str | None:
         """Build a C function prototype string (without trailing semicolon)."""

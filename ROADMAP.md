@@ -468,3 +468,133 @@ functions per struct — no runtime reflection, no external schema files, no sep
 | 4 | Entity tree with children → save/load → verify tree structure intact |
 | 4 | Cyclic parent pointer with `@backref` → verify no infinite loop, parent reconstructed |
 | 4 | File I/O round-trip, verify file on disk matches expected size |
+
+
+## User-Defined Codegen Hook Decorators
+
+> Allow users to define their own decorators (in plain `.py` files) that wrap
+> snekc's generated C output with platform-specific boilerplate. The compiler
+> doesn't know about the target platform — the user's hook does.
+
+### Motivation
+
+Users integrating snekc with external platforms (Sierra Chart, Unreal Engine,
+CoreAudio, Blender C API, etc.) need to wrap the generated C in
+platform-specific entry points, includes, and glue code. Rather than adding
+per-platform decorators to snekc, let users define their own hooks that
+receive the generated C and return the final output.
+
+### How it works
+
+1. User creates a `codegen_hooks.py` (or any `.py` file) next to their `.mpy`
+   source. This file contains plain Python functions that return decorator
+   callbacks.
+
+2. The `.mpy` file imports and uses the decorator:
+
+   ```python
+   from codegen_hooks import sierra_study
+
+   @sierra_study(name="My SMA", subgraphs=["SMA Line"])
+   def my_sma(close: ptr[float], count: int, output: ptr[float]) -> void:
+       ...
+   ```
+
+3. At compile time, snekc:
+   - Sees the decorator is imported from a `.py` file (not a built-in)
+   - Flags it as a codegen hook
+   - Compiles the function body to C as normal
+   - Calls the Python hook function, passing it the function name, parameter
+     list, return type, and generated C body as strings
+   - The hook returns the complete C output (or additional C to prepend/append)
+   - Snekc uses the hook's output instead of (or merged with) its normal output
+
+### Hook function interface
+
+The decorator factory returns a callback with this signature:
+
+```python
+def hook(func_name: str, params: list[tuple[str, str]], return_type: str, c_body: str) -> str:
+    """
+    func_name   — the function name (e.g. "my_sma")
+    params      — list of (param_name, c_type) tuples
+    return_type — C return type string (e.g. "void")
+    c_body      — the complete generated C function as a string,
+                  including signature and braces
+    Returns: full C source string to emit (replaces normal output for
+             this function, or wraps it with additional code)
+    """
+```
+
+### Implementation
+
+**In `compiler.py` first pass (~10 lines):**
+- When processing decorators on a function, check if the decorator name was
+  imported from a `.py` file (already tracked via `from_imports` or module
+  resolution).
+- If so, store it in a `codegen_hooks: dict[str, tuple[module_path, func_name, args]]`
+  map keyed by the decorated function name.
+
+**In codegen (~20 lines):**
+- After emitting a function's C code, check if it has a codegen hook registered.
+- If yes, import the `.py` module, call the decorator factory with the stored
+  args to get the hook callback, then call the callback with `(func_name,
+  params, return_type, c_body)`.
+- Replace or augment the emitted C with the hook's return value.
+- If the hook returns `None`, emit the function normally (no-op hook).
+
+**Edge cases to handle:**
+- Hook `.py` file not found → compile error with clear message
+- Hook function raises an exception → compile error showing the traceback
+- Multiple hooked functions in one file → each gets its own hook call, results
+  are concatenated in function order
+- Hook wants to add `#include` lines → it returns them as part of its string,
+  snekc deduplicates includes in the final output
+
+### Example: Sierra Chart ACSIL wrapper
+
+```python
+# codegen_hooks.py
+def sierra_study(name, subgraphs):
+    def hook(func_name, params, return_type, c_body):
+        sg_setup = ""
+        for i, sg in enumerate(subgraphs):
+            sg_setup += f'        sc.Subgraph[{i}].Name = "{sg}";\n'
+            sg_setup += f'        sc.Subgraph[{i}].DrawStyle = DRAWSTYLE_LINE;\n'
+
+        return f"""
+#include "sierrachart.h"
+SCDLLName("{name}")
+
+{c_body}
+
+SCSFExport scsf_{func_name}(SCStudyInterfaceRef sc)
+{{
+    if (sc.SetDefaults)
+    {{
+        sc.GraphName = "{name}";
+{sg_setup}
+        sc.AutoLoop = 0;
+        return;
+    }}
+
+    {func_name}(&sc.Close[0], sc.ArraySize, &sc.Subgraph[0].Data[0]);
+}}
+"""
+    return hook
+```
+
+### Estimated size
+
+~30-40 lines of compiler changes total. No new runtime code. No new syntax —
+uses existing decorator and import mechanisms.
+
+### Testing
+
+| Test | What |
+|------|------|
+| 1 | Hook that wraps a simple function with a C preamble/postamble — verify output contains both |
+| 2 | Hook that returns `None` — verify function emits normally |
+| 3 | Missing hook `.py` file — verify clear compile error |
+| 4 | Hook that raises an exception — verify traceback shown in compile error |
+| 5 | Two functions in one file with different hooks — verify both wrapped correctly |
