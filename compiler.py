@@ -1591,7 +1591,7 @@ class Compiler(StmtMixin, ExprMixin):
 
         has_main_func = "main" in mod_info.functions
 
-        if top_stmts and not has_main_func:
+        if top_stmts and not has_main_func and not _is_module:
             self.emit("int main(void) {")
             self.indent += 1
             for node in top_stmts:
