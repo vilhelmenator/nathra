@@ -1030,6 +1030,10 @@ static inline void mp_write_f32(MpWriter* w, float    v) { mp_write_bytes(w, &v,
 static inline void mp_write_f64(MpWriter* w, double   v) { mp_write_bytes(w, &v, 8); }
 static inline void mp_write_bool(MpWriter* w, int     v) { uint8_t b = v ? 1 : 0; mp_write_bytes(w, &b, 1); }
 
+static inline void mp_write_text(MpWriter* w, MpStr* s) {
+    mp_write_bytes(w, s->data, s->len);
+}
+
 static inline void mp_write_str(MpWriter* w, MpStr* s) {
     int32_t slen = (int32_t)s->len;
     mp_write_bytes(w, &slen, 4);

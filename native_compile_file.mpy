@@ -32,14 +32,14 @@ from native_analysis import native_infer_cold_from_body, native_build_alloc_tags
 
 def _emit(s: ptr[CompilerState], line: str) -> void:
     for i in range(s.indent):
-        mp_write_str(s.lines, str_new("    "))
-    mp_write_str(s.lines, line)
-    mp_write_str(s.lines, str_new("\n"))
+        mp_write_text(s.lines, str_new("    "))
+    mp_write_text(s.lines, line)
+    mp_write_text(s.lines, str_new("\n"))
 
 def _emit_raw(s: ptr[CompilerState], line: str) -> void:
     """Emit without indentation."""
-    mp_write_str(s.lines, line)
-    mp_write_str(s.lines, str_new("\n"))
+    mp_write_text(s.lines, line)
+    mp_write_text(s.lines, str_new("\n"))
 
 # ── First pass: collect declarations ────────────────────────────────────
 
@@ -140,6 +140,23 @@ def _emit_struct_defs(s: ptr[CompilerState], body: AstNodeList) -> void:
         for j in range(fl.count):
             _emit_raw(s, str_format("    %s %s;", fl.entries[j].ctype.data, fl.entries[j].name.data))
         _emit_raw(s, str_format("} %s;", cd.name.data))
+        # Constructor helper: _mp_make_StructName(fields...) → {.f1=f1, ...}
+        arg_list: str = str_new("")
+        body_list: str = str_new("")
+        for j in range(fl.count):
+            fname: str = fl.entries[j].name
+            ftype: str = fl.entries[j].ctype
+            if j > 0:
+                arg_list = str_concat(arg_list, str_new(", "))
+            arg_list = str_concat(arg_list, str_format("%s %s", ftype.data, fname.data))
+            body_list = str_concat(body_list, str_format("    _s.%s = %s;\n", fname.data, fname.data))
+        if fl.count == 0:
+            arg_list = str_new("void")
+        _emit_raw(s, str_format("static inline %s _mp_make_%s(%s) {", cd.name.data, cd.name.data, arg_list.data))
+        _emit_raw(s, str_format("    %s _s = {0};", cd.name.data))
+        _emit_raw(s, body_list)
+        _emit_raw(s, str_new("    return _s;"))
+        _emit_raw(s, str_new("}"))
         _emit_raw(s, str_new(""))
 
 def _emit_constants(s: ptr[CompilerState], body: AstNodeList) -> void:
@@ -184,6 +201,8 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
             continue
         fd: ptr[AstFunctionDef] = node.data
         ret: str = native_map_type(fd.returns)
+        if str_eq(fd.name, str_new("main")):
+            ret = str_new("int")
         # Build arg string
         args_node: ptr[AstArguments] = fd.args.data
         arg_str: str = str_new("")

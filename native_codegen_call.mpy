@@ -235,13 +235,44 @@ def native_call_struct_ctor(s: ptr[CompilerState], fname: str, arg_str: str) -> 
         return str_format("(%s){0}", fname.data)
     return str_format("(%s){%s}", fname.data, arg_str.data)
 
+# ── print() handler ─────────────────────────────────────────────────────
+
+def native_compile_print(s: ptr[CompilerState], pc: ptr[AstCall]) -> str:
+    """Compile print(args) → printf with type-dispatched format strings."""
+    if pc.args.count == 0:
+        return str_new("printf(\"\\n\")")
+
+    # Build printf parts for each argument
+    fmt: str = str_new("")
+    args_c: str = str_new("")
+    for i in range(pc.args.count):
+        if i > 0:
+            fmt = str_concat(fmt, str_new(" "))
+        arg: ptr[AstNode] = pc.args.items[i]
+        t: str = native_infer_type(s, arg)
+        expr: str = native_compile_expr(s, arg)
+        if str_eq(t, str_new("double")) or str_eq(t, str_new("float")):
+            fmt = str_concat(fmt, str_new("%g"))
+            args_c = str_concat(args_c, str_format(", %s", expr.data))
+        elif str_eq(t, str_new("MpStr*")):
+            fmt = str_concat(fmt, str_new("%.*s"))
+            args_c = str_concat(args_c, str_format(", (int)(%s)->len, (%s)->data", expr.data, expr.data))
+        elif str_eq(t, str_new("int")):
+            fmt = str_concat(fmt, str_new("%d"))
+            args_c = str_concat(args_c, str_format(", %s", expr.data))
+        else:
+            fmt = str_concat(fmt, str_new("%lld"))
+            args_c = str_concat(args_c, str_format(", (long long)(%s)", expr.data))
+    fmt = str_concat(fmt, str_new("\\n"))
+    return str_format("printf(\"%s\"%s)", fmt.data, args_c.data)
+
 # ── Emit helper ─────────────────────────────────────────────────────────
 
 def _emit_line(s: ptr[CompilerState], line: str) -> void:
     for i in range(s.indent):
-        mp_write_str(s.lines, str_new("    "))
-    mp_write_str(s.lines, line)
-    mp_write_str(s.lines, str_new("\n"))
+        mp_write_text(s.lines, str_new("    "))
+    mp_write_text(s.lines, line)
+    mp_write_text(s.lines, str_new("\n"))
 
 # ── Main call dispatcher ───────────────────────────────────────────────
 
@@ -320,6 +351,12 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
             if arg_parts is not None:
                 free(arg_parts)
             return str_format("mp_input(%s)", prompt.data)
+
+        # print() — type-dispatched printf
+        if str_eq(fname, str_new("print")):
+            if arg_parts is not None:
+                free(arg_parts)
+            return native_compile_print(s, pc)
 
         # Builtin table lookup
         c_name: cstr = lookup_builtin(fname)

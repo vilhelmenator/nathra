@@ -519,6 +519,7 @@ class ExprMixin:
                 "str_format": "mp_str_format",
                 "str_strip": "mp_str_strip", "str_lstrip": "mp_str_lstrip",
                 "str_rstrip": "mp_str_rstrip", "str_split": "mp_str_split",
+                "write_text": "mp_write_text",
                 "writer_new": "mp_writer_new", "writer_free": "mp_writer_free",
                 "writer_pos": "mp_writer_pos",
                 "write_bytes": "mp_write_bytes",

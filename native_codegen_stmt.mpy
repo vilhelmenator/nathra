@@ -28,9 +28,9 @@ from ast_nodes import TAG_BREAK, TAG_CONTINUE, TAG_PASS
 
 def _emit(s: ptr[CompilerState], line: str) -> void:
     for i in range(s.indent):
-        mp_write_str(s.lines, str_new("    "))
-    mp_write_str(s.lines, line)
-    mp_write_str(s.lines, str_new("\n"))
+        mp_write_text(s.lines, str_new("    "))
+    mp_write_text(s.lines, line)
+    mp_write_text(s.lines, str_new("\n"))
 
 # ── 5.1: compile_stmt dispatcher ────────────────────────────────────────
 
