@@ -349,30 +349,7 @@ class ExprMixin:
 
             # Struct constructors — use ClassName_new() if __init__ is defined
             if fname in self.structs:
-                if node.keywords:
-                    # Named initialization
-                    kwargs = {kw.arg: kw.value for kw in node.keywords}
-                    init_key = f"{fname}___init__"
-                    if init_key in self.func_ret_types:
-                        # Reorder by __init__ param order (skip 'self')
-                        params = [p for p in self.func_param_order.get(init_key, []) if p != "self"]
-                        ordered = []
-                        for i, p in enumerate(params):
-                            if p in kwargs:
-                                ordered.append(self.compile_expr(kwargs[p]))
-                            elif i < len(node.args):
-                                ordered.append(self.compile_expr(node.args[i]))
-                        return f"{fname}_new({', '.join(ordered)})"
-                    else:
-                        # Designated initializers — no __init__, use field names
-                        parts = [f".{kw.arg}={self.compile_expr(kw.value)}" for kw in node.keywords]
-                        return f"({fname}){{{', '.join(parts)}}}"
-                if f"{fname}___init__" in self.func_ret_types:
-                    return f"{fname}_new({arg_str})"
-                # No __init__: zero-init if no args, else designated init
-                if not arg_str:
-                    return f"({fname}){{0}}"
-                return f"({fname}){{{arg_str}}}"
+                return self._call_struct_ctor(fname, node, arg_str)
 
             # Typed list constructors: IntList_new() etc.
             for elem_t, list_name in self.typed_lists.items():
@@ -395,145 +372,31 @@ class ExprMixin:
 
             # sizeof with type name mapping
             if fname == "sizeof" and len(node.args) == 1:
-                arg = node.args[0]
-                if isinstance(arg, ast.Name):
-                    from type_map import TYPE_MAP
-                    mapped = TYPE_MAP.get(arg.id, arg.id)
-                    return f"sizeof({mapped})"
-                return f"sizeof({self.compile_expr(arg)})"
+                return self._call_sizeof(node)
 
             # abs / min / max
-            if fname == "abs" and len(node.args) == 1:
-                t = self.infer_type(node.args[0])
-                expr = self.compile_expr(node.args[0])
-                return f"fabs({expr})" if t == "double" else f"llabs((long long)({expr}))"
+            r = self._call_abs_min_max(fname, node, arg_str)
+            if r is not None:
+                return r
 
-            if fname in ("min", "max") and len(node.args) == 2:
-                t = self.infer_type(node.args[0])
-                a = self.compile_expr(node.args[0])
-                b = self.compile_expr(node.args[1])
-                if t == "double":
-                    return f"fmin({a}, {b})" if fname == "min" else f"fmax({a}, {b})"
-                op = "<" if fname == "min" else ">"
-                return f"(({a}) {op} ({b}) ? ({a}) : ({b}))"
+            # Type casts: int(), float(), str(), cast(), cast_int, etc.
+            r = self._call_type_cast(fname, node, arg_str)
+            if r is not None:
+                return r
 
-            # int(x) / float(x) casts
-            if fname == "int" and len(node.args) == 1:
-                return f"((int64_t)({self.compile_expr(node.args[0])}))"
-            if fname == "float" and len(node.args) == 1:
-                return f"((double)({self.compile_expr(node.args[0])}))"
+            # Pointer operations: addr_of, ref, deref, cast_ptr
+            r = self._call_ptr_ops(fname, node, arg_str)
+            if r is not None:
+                return r
 
-            # str(x) — convert value to MpStr*
-            if fname == "str" and len(node.args) == 1:
-                arg = node.args[0]
-                t = self.infer_type(arg)
-                expr = self.compile_expr(arg)
-                if t == "MpStr*":
-                    return expr
-                if t == "double":
-                    return f"mp_str_from_float({expr})"
-                if t in ("char*", "cstr"):
-                    return f"mp_str_new({expr})"
-                return f"mp_str_from_int((int64_t)({expr}))"
+            # Result[T] helpers: Ok, Err, is_ok, is_err, unwrap, try_unwrap
+            r = self._call_result(fname, node, arg_str)
+            if r is not None:
+                return r
 
-            # Cast builtins
-            cast_map = {"cast_int": "int64_t", "cast_float": "double",
-                        "cast_byte": "uint8_t", "cast_bool": "int"}
-            if fname in cast_map:
-                return f"(({cast_map[fname]})({arg_str}))"
-
-            # Generic cast: cast(Type, value) → (ctype)(value)
-            if fname == "cast" and len(node.args) == 2:
-                from type_map import map_type as _mt
-                cast_type = _mt(node.args[0])
-                cast_val = self.compile_expr(node.args[1])
-                return f"(({cast_type})({cast_val}))"
-
-            # addr_of(x) / ref(x) → &x
-            if fname in ("addr_of", "ref"):
-                return f"(&{arg_str})"
-
-            # deref(p) → *p
-            if fname == "deref":
-                if len(node.args) == 2:
-                    # deref(ptr, val) → *ptr = val  (write form)
-                    ptr_expr = self.compile_expr(node.args[0])
-                    val_expr = self.compile_expr(node.args[1])
-                    self.emit(f"*({ptr_expr}) = {val_expr};")
-                    return "(void)0"
-                return f"(*({arg_str}))"
-
-            # deref_set(p, val) → *p = val  (kept for back-compat)
-            if fname == "deref_set":
-                ptr_expr = self.compile_expr(node.args[0])
-                val_expr = self.compile_expr(node.args[1])
-                return f"(*({ptr_expr}) = {val_expr})"
-
-            # cast_ptr(x) → (void*)x  or cast_ptr_Type(x) → (Type*)x
-            if fname == "cast_ptr":
-                return f"((void*)({arg_str}))"
-            if fname.startswith("cast_ptr_"):
-                target_type = fname[9:]  # after "cast_ptr_"
-                return f"(({target_type}*)({arg_str}))"
-
-            # Result[T] helpers
-            if fname == "Ok" and len(node.args) == 1:
-                inner_type = self.infer_type(node.args[0])
-                result_name = f"Result_{mangle_type(inner_type)}"
-                val = self.compile_expr(node.args[0])
-                return f"{result_name}_ok({val})"
-
-            if fname == "Err" and len(node.args) == 1:
-                msg = self.compile_expr(node.args[0])
-                ret = self.current_func_ret_type
-                if ret.startswith("Result_"):
-                    return f"{ret}_err({msg})"
-                return f'({{ fprintf(stderr, "%s\\n", {msg}); abort(); 0; }})'
-
-            if fname == "is_ok" and len(node.args) == 1:
-                expr = self.compile_expr(node.args[0])
-                return f"MP_LIKELY(({expr})._ok)"
-
-            if fname == "is_err" and len(node.args) == 1:
-                expr = self.compile_expr(node.args[0])
-                return f"MP_UNLIKELY(!({expr})._ok)"
-
-            if fname == "unwrap" and len(node.args) == 1:
-                t = self.infer_type(node.args[0])
-                expr = self.compile_expr(node.args[0])
-                if t.startswith("Result_"):
-                    return f"{t}_unwrap({expr})"
-                return expr
-
-            if fname == "err_msg" and len(node.args) == 1:
-                expr = self.compile_expr(node.args[0])
-                return f"({expr})._err"
-
-            if fname == "try_unwrap" and len(node.args) == 1:
-                result_expr = self.compile_expr(node.args[0])
-                result_type = self.infer_type(node.args[0])
-                self._try_counter = getattr(self, '_try_counter', 0) + 1
-                tmp = f"_mp_try_{self._try_counter}"
-                self.emit(f"{result_type} {tmp} = {result_expr};")
-                ret = self.current_func_ret_type
-                if ret.startswith("Result_"):
-                    self.emit(f"if (!{tmp}._ok) return {ret}_err({tmp}._err);")
-                else:
-                    self.emit(f"if (!{tmp}._ok) {{ fprintf(stderr, \"%s\\n\", {tmp}._err); abort(); }}")
-                return f"{tmp}._val"
-
-            # sort(arr, cmp_fn) — qsort wrapper for typed arrays
+            # sort(arr, cmp_fn) — qsort wrapper
             if fname == "sort" and len(node.args) == 2:
-                arr_node = node.args[0]
-                cmp_node = node.args[1]
-                cmp_expr = self.compile_expr(cmp_node)
-                if isinstance(arr_node, ast.Name) and arr_node.id in self._array_vars:
-                    arr_name = arr_node.id
-                    elem_type, size = self._array_vars[arr_name]
-                    return (f"qsort({arr_name}, {size}, sizeof({elem_type}), "
-                            f"(int(*)(const void*, const void*)){cmp_expr})")
-                arr_expr = self.compile_expr(arr_node)
-                return f"qsort({arr_expr}, 0, 0, (int(*)(const void*, const void*)){cmp_expr})"
+                return self._call_sort(node)
 
             # exit(n)
             if fname == "exit":
@@ -541,32 +404,18 @@ class ExprMixin:
                 return f"exit({code})"
 
             # va_start / va_end / va_arg
-            if fname == "va_start":
-                ap = self.compile_expr(node.args[0])
-                last = self.compile_expr(node.args[1])
-                return f"va_start({ap}, {last})"
-            if fname == "va_end":
-                ap = self.compile_expr(node.args[0])
-                return f"va_end({ap})"
-            if fname == "va_arg":
-                from type_map import map_type as _map_type
-                ap = self.compile_expr(node.args[0])
-                T = _map_type(node.args[1])
-                return f"va_arg({ap}, {T})"
+            r = self._call_variadic(fname, node, arg_str)
+            if r is not None:
+                return r
 
             # input(prompt?) — read a line from stdin
             if fname == "input":
                 prompt = arg_str if arg_str else "NULL"
                 return f"mp_input({prompt})"
 
-            # getenv(name) — get environment variable, returns ptr[str] (NULL if not set)
+            # getenv(name)
             if fname == "getenv" and len(node.args) == 1:
-                arg = node.args[0]
-                expr = self.compile_expr(arg)
-                # MpStr* variable → extract .data; string literals and cstr → pass directly
-                if not isinstance(arg, ast.Constant) and self.infer_type(arg) == "MpStr*":
-                    return f"mp_getenv(({expr})->data)"
-                return f"mp_getenv({expr})"
+                return self._call_getenv(node)
 
             # Math functions (direct or via 'math' import)
             if fname in self._MATH_FUNCS:
@@ -574,32 +423,7 @@ class ExprMixin:
 
             # len(x) — type-dispatched length
             if fname == "len" and len(node.args) == 1:
-                arg = node.args[0]
-                arg_expr = self.compile_expr(arg)
-                if isinstance(arg, ast.Name):
-                    aname = arg.id
-                    if aname in self._array_vars:
-                        _, size = self._array_vars[aname]
-                        return size
-                    if aname in self._list_vars:
-                        return f"{arg_expr}->len"
-                    # mutable global arrays
-                    if aname in self.mutable_globals:
-                        # check if it's an array global - look up size from globals
-                        pass
-                # Fallback by inferred type
-                t = self.infer_type(arg)
-                t_base = t.rstrip("*").strip()
-                # __len__ special method
-                if t_base in self.structs and f"{t_base}___len__" in self.func_ret_types:
-                    return f"{t_base}___len__(&({arg_expr}))"
-                if t == "MpStr*":
-                    return f"mp_str_len({arg_expr})"
-                if t == "MpList*":
-                    return f"mp_list_len({arg_expr})"
-                if t.endswith("*"):
-                    return f"{arg_expr}->len"
-                return f"mp_list_len({arg_expr})"
+                return self._call_len(node)
 
             # Universal print()
             if fname == "print":
@@ -732,132 +556,325 @@ class ExprMixin:
             return f"{fname}({arg_str})"
 
         if isinstance(node.func, ast.Attribute):
-            obj = node.func.value
-            attr = node.func.attr
-            # math.sqrt(x) etc.
-            if isinstance(obj, ast.Name) and obj.id == "math" and attr in self._MATH_FUNCS:
-                return f"{self._MATH_FUNCS[attr]}({arg_str})"
-            if isinstance(obj, ast.Name) and obj.id in self.modules:
-                mi = self.modules[obj.id]
-                # Struct constructor: mod.StructName(args) → StructName_new(args)
-                if attr in mi.structs:
-                    if f"{attr}___init__" in self.func_ret_types:
-                        return f"{attr}_new({arg_str})"
-                    return f"({attr}){{{arg_str}}}"
-                return f"{attr}({arg_str})"
-            # Static method call: ClassName.method(args) — no self injection
-            if isinstance(obj, ast.Name) and obj.id in self.structs:
-                return f"{obj.id}_{attr}({arg_str})"
-            obj_str = self.compile_expr(obj)
-            # Resolve TypeName_method via type inference
-            obj_type = self.infer_type(obj)
-
-            # Generated typed list dispatch (struct element types, no boxing)
-            if isinstance(obj, ast.Name):
-                _et = self._list_vars.get(obj.id)
-                if _et and _et in self.typed_lists:
-                    _lname = self.typed_lists[_et]
-                    if attr == "append" and len(node.args) == 1:
-                        v = self.compile_expr(node.args[0])
-                        return f"{_lname}_append({obj_str}, {v})"
-                    if attr == "pop" and not node.args:
-                        return f"{_lname}_pop({obj_str})"
-                    if attr == "len" and not node.args:
-                        return f"{_lname}_len({obj_str})"
-
-            # MpList* method dispatch with auto-boxing/unboxing
-            if obj_type == "MpList*":
-                def _box(a_node):
-                    e = self.compile_expr(a_node)
-                    t = self.infer_type(a_node)
-                    if t == "double": return f"mp_val_float({e})"
-                    if t == "MpStr*": return f"mp_val_str({e})"
-                    return f"mp_val_int((int64_t)({e}))"
-                elem_type = self._list_vars.get(obj.id) if isinstance(obj, ast.Name) else None
-                if attr == "append" and len(node.args) == 1:
-                    return f"mp_list_append({obj_str}, {_box(node.args[0])})"
-                if attr == "pop" and not node.args:
-                    raw = f"mp_list_pop({obj_str})"
-                    if elem_type == "double": return f"mp_as_float({raw})"
-                    if elem_type == "MpStr*": return f"(MpStr*)(uintptr_t)mp_as_int({raw})"
-                    if elem_type: return f"(({elem_type})mp_as_int({raw}))"
-                    return raw
-                if attr == "len" and not node.args:
-                    return f"mp_list_len({obj_str})"
-
-            # MpFile method dispatch  (f.write(...), f.read(), etc.)
-            if obj_type == "MpFile":
-                _file_methods = {
-                    "write_line":  "mp_file_write_line",
-                    "write_int":   "mp_file_write_int",
-                    "write_float": "mp_file_write_float",
-                    "close":       "mp_file_close",
-                    "eof":         "mp_file_eof",
-                }
-                if attr in _file_methods:
-                    return f"{_file_methods[attr]}({obj_str}, {arg_str})" if arg_str else f"{_file_methods[attr]}({obj_str})"
-                if attr == "write" and len(node.args) == 1:
-                    arg_node = node.args[0]
-                    arg_val = self.compile_expr(arg_node)
-                    # String constants compile to char* literals — use write, not write_str
-                    is_str_obj = (not isinstance(arg_node, ast.Constant) and
-                                  self.infer_type(arg_node) == "MpStr*")
-                    fn = "mp_file_write_str" if is_str_obj else "mp_file_write"
-                    return f"{fn}({obj_str}, {arg_val})"
-                if attr == "read" and not node.args:
-                    return f"mp_file_read_all({obj_str})"
-                if attr == "readline" and not node.args:
-                    return f"mp_file_read_line({obj_str})"
-
-            base = obj_type.rstrip("*").strip()
-            if obj_type.endswith("*") or base in self.structs:
-                # Check if attr is a funcptr field — call it as a function pointer
-                _struct_field_types = dict(self.structs.get(base, []))
-                if _struct_field_types.get(attr) == "__funcptr__":
-                    sep = "->" if obj_type.endswith("*") else "."
-                    return f"{obj_str}{sep}{attr}({arg_str})"
-
-                if base.startswith("Mp") and len(base) > 2:
-                    prefix = "mp_" + base[2:].lower()
-                else:
-                    prefix = base
-                # Value-type structs: pass &obj as self (pointer self).
-                # If obj is an rvalue (Call, BinOp, …), spill to a temp so we
-                # can take its address — C does not allow &(rvalue).
-                if base in self.structs:
-                    if obj_type.endswith("*"):
-                        # Already a pointer — pass directly, no & needed
-                        self_arg = obj_str
-                    else:
-                        _is_lval = isinstance(obj, (ast.Name, ast.Attribute, ast.Subscript))
-                        if not _is_lval:
-                            _tmp = f"_tmp_{base.lower()}_{id(node) & 0xFFFF:04x}"
-                            self.emit(f"{base} {_tmp} = {obj_str};")
-                            obj_str = _tmp
-                        self_arg = f"&({obj_str})"
-                    # Auto-deref args: if a T* is passed where T is expected, emit (*arg)
-                    _cfunc = f"{prefix}_{attr}"
-                    _ptypes = self.func_param_types.get(_cfunc, [])
-                    if _ptypes and node.args:
-                        _coerced = []
-                        for _i, (_aexpr, _anode) in enumerate(zip(args, node.args)):
-                            _pidx = _i + 1  # skip self param
-                            if _pidx < len(_ptypes):
-                                _exp = _ptypes[_pidx]
-                                _inf = self.infer_type(_anode)
-                                if _inf.endswith("*") and _exp == _inf[:-1].strip():
-                                    _aexpr = f"(*({_aexpr}))"
-                            _coerced.append(_aexpr)
-                        arg_str = ", ".join(_coerced)
-                else:
-                    self_arg = obj_str
-                all_args = f"{self_arg}, {arg_str}" if arg_str else self_arg
-                return f"{prefix}_{attr}({all_args})"
-            all_args = f"{obj_str}, {arg_str}" if arg_str else obj_str
-            return f"{attr}({all_args})"
+            return self._call_method(node, args, arg_str)
 
         func_str = self.compile_expr(node.func)
         return f"{func_str}({arg_str})"
+
+    # -------------------------------------------------------------------
+    # Extracted call handlers (from compile_call)
+    # -------------------------------------------------------------------
+
+    def _call_struct_ctor(self, fname, node, arg_str):
+        if node.keywords:
+            kwargs = {kw.arg: kw.value for kw in node.keywords}
+            init_key = f"{fname}___init__"
+            if init_key in self.func_ret_types:
+                params = [p for p in self.func_param_order.get(init_key, []) if p != "self"]
+                ordered = []
+                for i, p in enumerate(params):
+                    if p in kwargs:
+                        ordered.append(self.compile_expr(kwargs[p]))
+                    elif i < len(node.args):
+                        ordered.append(self.compile_expr(node.args[i]))
+                return f"{fname}_new({', '.join(ordered)})"
+            else:
+                parts = [f".{kw.arg}={self.compile_expr(kw.value)}" for kw in node.keywords]
+                return f"({fname}){{{', '.join(parts)}}}"
+        if f"{fname}___init__" in self.func_ret_types:
+            return f"{fname}_new({arg_str})"
+        if not arg_str:
+            return f"({fname}){{0}}"
+        return f"({fname}){{{arg_str}}}"
+
+    def _call_sizeof(self, node):
+        arg = node.args[0]
+        if isinstance(arg, ast.Name):
+            from type_map import TYPE_MAP
+            mapped = TYPE_MAP.get(arg.id, arg.id)
+            return f"sizeof({mapped})"
+        return f"sizeof({self.compile_expr(arg)})"
+
+    def _call_abs_min_max(self, fname, node, arg_str):
+        if fname == "abs" and len(node.args) == 1:
+            t = self.infer_type(node.args[0])
+            expr = self.compile_expr(node.args[0])
+            return f"fabs({expr})" if t == "double" else f"llabs((long long)({expr}))"
+        if fname in ("min", "max") and len(node.args) == 2:
+            t = self.infer_type(node.args[0])
+            a = self.compile_expr(node.args[0])
+            b = self.compile_expr(node.args[1])
+            if t == "double":
+                return f"fmin({a}, {b})" if fname == "min" else f"fmax({a}, {b})"
+            op = "<" if fname == "min" else ">"
+            return f"(({a}) {op} ({b}) ? ({a}) : ({b}))"
+        return None
+
+    def _call_type_cast(self, fname, node, arg_str):
+        if fname == "int" and len(node.args) == 1:
+            return f"((int64_t)({self.compile_expr(node.args[0])}))"
+        if fname == "float" and len(node.args) == 1:
+            return f"((double)({self.compile_expr(node.args[0])}))"
+        if fname == "str" and len(node.args) == 1:
+            arg = node.args[0]
+            t = self.infer_type(arg)
+            expr = self.compile_expr(arg)
+            if t == "MpStr*":
+                return expr
+            if t == "double":
+                return f"mp_str_from_float({expr})"
+            if t in ("char*", "cstr"):
+                return f"mp_str_new({expr})"
+            return f"mp_str_from_int((int64_t)({expr}))"
+        cast_map = {"cast_int": "int64_t", "cast_float": "double",
+                    "cast_byte": "uint8_t", "cast_bool": "int"}
+        if fname in cast_map:
+            return f"(({cast_map[fname]})({arg_str}))"
+        if fname == "cast" and len(node.args) == 2:
+            from type_map import map_type as _mt
+            cast_type = _mt(node.args[0])
+            cast_val = self.compile_expr(node.args[1])
+            return f"(({cast_type})({cast_val}))"
+        return None
+
+    def _call_ptr_ops(self, fname, node, arg_str):
+        if fname in ("addr_of", "ref"):
+            return f"(&{arg_str})"
+        if fname == "deref":
+            if len(node.args) == 2:
+                ptr_expr = self.compile_expr(node.args[0])
+                val_expr = self.compile_expr(node.args[1])
+                self.emit(f"*({ptr_expr}) = {val_expr};")
+                return "(void)0"
+            return f"(*({arg_str}))"
+        if fname == "deref_set":
+            ptr_expr = self.compile_expr(node.args[0])
+            val_expr = self.compile_expr(node.args[1])
+            return f"(*({ptr_expr}) = {val_expr})"
+        if fname == "cast_ptr":
+            return f"((void*)({arg_str}))"
+        if fname.startswith("cast_ptr_"):
+            target_type = fname[9:]
+            return f"(({target_type}*)({arg_str}))"
+        return None
+
+    def _call_result(self, fname, node, arg_str):
+        if fname == "Ok" and len(node.args) == 1:
+            inner_type = self.infer_type(node.args[0])
+            result_name = f"Result_{mangle_type(inner_type)}"
+            val = self.compile_expr(node.args[0])
+            return f"{result_name}_ok({val})"
+        if fname == "Err" and len(node.args) == 1:
+            msg = self.compile_expr(node.args[0])
+            ret = self.current_func_ret_type
+            if ret.startswith("Result_"):
+                return f"{ret}_err({msg})"
+            return f'({{ fprintf(stderr, "%s\\n", {msg}); abort(); 0; }})'
+        if fname == "is_ok" and len(node.args) == 1:
+            expr = self.compile_expr(node.args[0])
+            return f"MP_LIKELY(({expr})._ok)"
+        if fname == "is_err" and len(node.args) == 1:
+            expr = self.compile_expr(node.args[0])
+            return f"MP_UNLIKELY(!({expr})._ok)"
+        if fname == "unwrap" and len(node.args) == 1:
+            t = self.infer_type(node.args[0])
+            expr = self.compile_expr(node.args[0])
+            if t.startswith("Result_"):
+                return f"{t}_unwrap({expr})"
+            return expr
+        if fname == "err_msg" and len(node.args) == 1:
+            expr = self.compile_expr(node.args[0])
+            return f"({expr})._err"
+        if fname == "try_unwrap" and len(node.args) == 1:
+            result_expr = self.compile_expr(node.args[0])
+            result_type = self.infer_type(node.args[0])
+            self._try_counter = getattr(self, '_try_counter', 0) + 1
+            tmp = f"_mp_try_{self._try_counter}"
+            self.emit(f"{result_type} {tmp} = {result_expr};")
+            ret = self.current_func_ret_type
+            if ret.startswith("Result_"):
+                self.emit(f"if (!{tmp}._ok) return {ret}_err({tmp}._err);")
+            else:
+                self.emit(f"if (!{tmp}._ok) {{ fprintf(stderr, \"%s\\n\", {tmp}._err); abort(); }}")
+            return f"{tmp}._val"
+        return None
+
+    def _call_sort(self, node):
+        arr_node = node.args[0]
+        cmp_node = node.args[1]
+        cmp_expr = self.compile_expr(cmp_node)
+        if isinstance(arr_node, ast.Name) and arr_node.id in self._array_vars:
+            arr_name = arr_node.id
+            elem_type, size = self._array_vars[arr_name]
+            return (f"qsort({arr_name}, {size}, sizeof({elem_type}), "
+                    f"(int(*)(const void*, const void*)){cmp_expr})")
+        arr_expr = self.compile_expr(arr_node)
+        return f"qsort({arr_expr}, 0, 0, (int(*)(const void*, const void*)){cmp_expr})"
+
+    def _call_variadic(self, fname, node, arg_str):
+        if fname == "va_start":
+            ap = self.compile_expr(node.args[0])
+            last = self.compile_expr(node.args[1])
+            return f"va_start({ap}, {last})"
+        if fname == "va_end":
+            ap = self.compile_expr(node.args[0])
+            return f"va_end({ap})"
+        if fname == "va_arg":
+            from type_map import map_type as _map_type
+            ap = self.compile_expr(node.args[0])
+            T = _map_type(node.args[1])
+            return f"va_arg({ap}, {T})"
+        return None
+
+    def _call_getenv(self, node):
+        arg = node.args[0]
+        expr = self.compile_expr(arg)
+        if not isinstance(arg, ast.Constant) and self.infer_type(arg) == "MpStr*":
+            return f"mp_getenv(({expr})->data)"
+        return f"mp_getenv({expr})"
+
+    def _call_len(self, node):
+        arg = node.args[0]
+        arg_expr = self.compile_expr(arg)
+        if isinstance(arg, ast.Name):
+            aname = arg.id
+            if aname in self._array_vars:
+                _, size = self._array_vars[aname]
+                return size
+            if aname in self._list_vars:
+                return f"{arg_expr}->len"
+            if aname in self.mutable_globals:
+                pass
+        t = self.infer_type(arg)
+        t_base = t.rstrip("*").strip()
+        if t_base in self.structs and f"{t_base}___len__" in self.func_ret_types:
+            return f"{t_base}___len__(&({arg_expr}))"
+        if t == "MpStr*":
+            return f"mp_str_len({arg_expr})"
+        if t == "MpList*":
+            return f"mp_list_len({arg_expr})"
+        if t.endswith("*"):
+            return f"{arg_expr}->len"
+        return f"mp_list_len({arg_expr})"
+
+    def _call_method(self, node, args, arg_str):
+        """Handle attribute-based calls: obj.method(args)."""
+        obj = node.func.value
+        attr = node.func.attr
+        # math.sqrt(x) etc.
+        if isinstance(obj, ast.Name) and obj.id == "math" and attr in self._MATH_FUNCS:
+            return f"{self._MATH_FUNCS[attr]}({arg_str})"
+        if isinstance(obj, ast.Name) and obj.id in self.modules:
+            mi = self.modules[obj.id]
+            if attr in mi.structs:
+                if f"{attr}___init__" in self.func_ret_types:
+                    return f"{attr}_new({arg_str})"
+                return f"({attr}){{{arg_str}}}"
+            return f"{attr}({arg_str})"
+        # Static method call: ClassName.method(args) — no self injection
+        if isinstance(obj, ast.Name) and obj.id in self.structs:
+            return f"{obj.id}_{attr}({arg_str})"
+        obj_str = self.compile_expr(obj)
+        obj_type = self.infer_type(obj)
+
+        # Generated typed list dispatch (struct element types, no boxing)
+        if isinstance(obj, ast.Name):
+            _et = self._list_vars.get(obj.id)
+            if _et and _et in self.typed_lists:
+                _lname = self.typed_lists[_et]
+                if attr == "append" and len(node.args) == 1:
+                    v = self.compile_expr(node.args[0])
+                    return f"{_lname}_append({obj_str}, {v})"
+                if attr == "pop" and not node.args:
+                    return f"{_lname}_pop({obj_str})"
+                if attr == "len" and not node.args:
+                    return f"{_lname}_len({obj_str})"
+
+        # MpList* method dispatch with auto-boxing/unboxing
+        if obj_type == "MpList*":
+            def _box(a_node):
+                e = self.compile_expr(a_node)
+                t = self.infer_type(a_node)
+                if t == "double": return f"mp_val_float({e})"
+                if t == "MpStr*": return f"mp_val_str({e})"
+                return f"mp_val_int((int64_t)({e}))"
+            elem_type = self._list_vars.get(obj.id) if isinstance(obj, ast.Name) else None
+            if attr == "append" and len(node.args) == 1:
+                return f"mp_list_append({obj_str}, {_box(node.args[0])})"
+            if attr == "pop" and not node.args:
+                raw = f"mp_list_pop({obj_str})"
+                if elem_type == "double": return f"mp_as_float({raw})"
+                if elem_type == "MpStr*": return f"(MpStr*)(uintptr_t)mp_as_int({raw})"
+                if elem_type: return f"(({elem_type})mp_as_int({raw}))"
+                return raw
+            if attr == "len" and not node.args:
+                return f"mp_list_len({obj_str})"
+
+        # MpFile method dispatch
+        if obj_type == "MpFile":
+            _file_methods = {
+                "write_line":  "mp_file_write_line",
+                "write_int":   "mp_file_write_int",
+                "write_float": "mp_file_write_float",
+                "close":       "mp_file_close",
+                "eof":         "mp_file_eof",
+            }
+            if attr in _file_methods:
+                return f"{_file_methods[attr]}({obj_str}, {arg_str})" if arg_str else f"{_file_methods[attr]}({obj_str})"
+            if attr == "write" and len(node.args) == 1:
+                arg_node = node.args[0]
+                arg_val = self.compile_expr(arg_node)
+                is_str_obj = (not isinstance(arg_node, ast.Constant) and
+                              self.infer_type(arg_node) == "MpStr*")
+                fn = "mp_file_write_str" if is_str_obj else "mp_file_write"
+                return f"{fn}({obj_str}, {arg_val})"
+            if attr == "read" and not node.args:
+                return f"mp_file_read_all({obj_str})"
+            if attr == "readline" and not node.args:
+                return f"mp_file_read_line({obj_str})"
+
+        base = obj_type.rstrip("*").strip()
+        if obj_type.endswith("*") or base in self.structs:
+            # Function pointer field dispatch
+            _struct_field_types = dict(self.structs.get(base, []))
+            if _struct_field_types.get(attr) == "__funcptr__":
+                sep = "->" if obj_type.endswith("*") else "."
+                return f"{obj_str}{sep}{attr}({arg_str})"
+
+            if base.startswith("Mp") and len(base) > 2:
+                prefix = "mp_" + base[2:].lower()
+            else:
+                prefix = base
+            if base in self.structs:
+                if obj_type.endswith("*"):
+                    self_arg = obj_str
+                else:
+                    _is_lval = isinstance(obj, (ast.Name, ast.Attribute, ast.Subscript))
+                    if not _is_lval:
+                        _tmp = f"_tmp_{base.lower()}_{id(node) & 0xFFFF:04x}"
+                        self.emit(f"{base} {_tmp} = {obj_str};")
+                        obj_str = _tmp
+                    self_arg = f"&({obj_str})"
+                # Auto-deref args
+                _cfunc = f"{prefix}_{attr}"
+                _ptypes = self.func_param_types.get(_cfunc, [])
+                if _ptypes and node.args:
+                    _coerced = []
+                    for _i, (_aexpr, _anode) in enumerate(zip(args, node.args)):
+                        _pidx = _i + 1
+                        if _pidx < len(_ptypes):
+                            _exp = _ptypes[_pidx]
+                            _inf = self.infer_type(_anode)
+                            if _inf.endswith("*") and _exp == _inf[:-1].strip():
+                                _aexpr = f"(*({_aexpr}))"
+                        _coerced.append(_aexpr)
+                    arg_str = ", ".join(_coerced)
+            else:
+                self_arg = obj_str
+            all_args = f"{self_arg}, {arg_str}" if arg_str else self_arg
+            return f"{prefix}_{attr}({all_args})"
+        all_args = f"{obj_str}, {arg_str}" if arg_str else obj_str
+        return f"{attr}({all_args})"
 
     def _fstr_to_printf(self, node: ast.JoinedStr):
         """Convert an f-string to (fmt_string, [c_args]) for use with printf/snprintf."""
