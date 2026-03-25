@@ -753,34 +753,36 @@ Work items:
 
 ---
 
-## Ordering
+## Status
 
 ```
- 1. String literal inference          (small, high impact, unblocks f-strings)
- 2. f-string codegen improvements     (JoinedStr already parsed, needs polish)
- 3. List literals and type inference   ([], [1,2,3])
- 4. Dict subscript syntax             (d["k"] = v, v = d["k"])
- 5. Typed dict[K, V]                  (auto box/unbox)
- 6. Dict literals                     ({...} sugar)
- 7. Safety: division by zero          (smallest standalone check, proves the flag plumbing)
- 8. Safety: null analysis (static)    (three-value lattice, compile errors for provably-null — always on)
- 9. Safety: null checks (runtime)     (emit checks for `unknown` state under --safe)
-10. Safety: out of bounds             (array + list)
-11. Safety: integer overflow           (__builtin_*_overflow wrappers)
-12. `in` operator for list and dict
-13. Dict iteration                    (for k, v in d.items())
-14. List slicing and concatenation
-15. Auto-defer for str/list/dict      (extend escape analysis)
+ 1. String literal inference          ✅
+ 2. f-string codegen improvements     ✅
+ 3. List literals and type inference   ✅
+ 4. Dict subscript syntax             ✅
+ 5. Typed dict[K, V]                  ✅
+ 6. Dict literals                     ✅
+ 7. `in` operator for list and dict   ✅
+ 8. Dict iteration                    ✅
+ 9. List slicing and concatenation    ✅
+10. Auto-defer for str/list/dict      ✅
 ```
 
-Items 1–3 are the highest leverage — they cover the most common verbosity
-pain points and each is a self-contained compiler change. Items 4–6 build
-on each other. Items 7–11 are the safety tier: division by zero first to
-prove the `--safe` flag plumbing end-to-end, then null analysis in two
-stages — static analysis (item 8) is always-on and catches provably-null
-dereferences as compile errors with zero runtime cost, then runtime checks
-(item 9) handle the `unknown` cases under `--safe`. Item 15 is a
-cross-cutting improvement that benefits all three built-in types.
+## Next up — safety checks
+
+```
+ 1. Division by zero          (smallest standalone check, proves the --safe flag plumbing)
+ 2. Null analysis (static)    (three-value lattice, compile errors for provably-null — always on)
+ 3. Null checks (runtime)     (emit checks for `unknown` state under --safe)
+ 4. Out of bounds             (array + list)
+ 5. Integer overflow           (__builtin_*_overflow wrappers)
+```
+
+Division by zero first to prove the `--safe` flag plumbing end-to-end,
+then null analysis in two stages — static analysis (item 2) is always-on
+and catches provably-null dereferences as compile errors with zero runtime
+cost, then runtime checks (item 3) handle the `unknown` cases under
+`--safe`.
 
 Each item is independently testable by comparing generated C output between
 the Python and native compiler paths, same strategy used for the bootstrap.
@@ -978,9 +980,9 @@ sma_study.mpy:55: integer overflow in multiplication
 ### CLI
 
 ```sh
-python3 mpy.py program.mpy --safe              # enable all safety checks
-python3 mpy.py program.mpy --safe --run        # safe + run
-python3 mpy.py program.mpy                     # release: no checks (default)
+python3 cli/mpy.py program.mpy --safe              # enable all safety checks
+python3 cli/mpy.py program.mpy --safe --run        # safe + run
+python3 cli/mpy.py program.mpy                     # release: no checks (default)
 ```
 
 The `--safe` flag can be combined with `--flags="-O2"` — the checks are
