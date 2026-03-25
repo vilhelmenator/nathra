@@ -1348,8 +1348,11 @@ class Compiler(StmtMixin, ExprMixin):
         if module_name != "__main__":
             self.emit(f'#include "{module_name}.h"')
         else:
+            seen_c_imports = set()
             for imp in self.imports:
-                self.emit(f'#include "{imp}.h"')
+                if imp not in seen_c_imports:
+                    self.emit(f'#include "{imp}.h"')
+                    seen_c_imports.add(imp)
         self.emit("")
 
         # Module-level c_code() — forward declarations, extern prototypes, etc.
@@ -1656,8 +1659,11 @@ class Compiler(StmtMixin, ExprMixin):
         self.emit_header(f"#ifndef {guard}")
         self.emit_header(f"#define {guard}")
         self.emit_header('#include "micropy_types.h"')
+        seen_imports = set()
         for imp in self.imports:
-            self.emit_header(f'#include "{imp}.h"')
+            if imp not in seen_imports:
+                self.emit_header(f'#include "{imp}.h"')
+                seen_imports.add(imp)
 
         for ename, members in mod_info.enums.items():
             self.emit_header(f"typedef enum {{")

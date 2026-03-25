@@ -10,7 +10,7 @@ from ast_nodes import AstReturn, AstRaise, AstExprStmt, AstIf, AstWhile
 from ast_nodes import AstFor, AstWith, AstWithItem, AstAssign, AstAugAssign
 from ast_nodes import AstAnnAssign, AstAssert, AstBoolOp, AstCompare
 from ast_nodes import AstCall, AstAttribute, AstBinOp, AstMatch
-from ast_nodes import AstSubscript, AstTuple, TAG_SUBSCRIPT, TAG_TUPLE
+from ast_nodes import AstSubscript, AstTuple, AstList, AstDict, TAG_SUBSCRIPT, TAG_TUPLE, TAG_LIST, TAG_DICT
 from ast_nodes import AstMatch, AstMatchCase, AstMatchValue, AstMatchAs, AstMatchOr
 from ast_nodes import TAG_MATCH_CASE, TAG_MATCH_VALUE, TAG_MATCH_AS, TAG_MATCH_OR
 from ast_nodes import TAG_CONSTANT, TAG_NAME, TAG_CALL, TAG_ATTRIBUTE
@@ -339,6 +339,16 @@ def native_compile_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void:
                         idx_e: str = native_compile_expr(s, ts.slice)
                         _emit(s, str_format("%s_set(%s, %s, %s);", tl_ln.data, obj_e.data, idx_e.data, val.data))
                         continue
+                # Dict subscript write: d["key"] = val → dict_set(d, key, box(val))
+                d_vt: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + tn.id)
+                if d_vt is not None:
+                    d_obj: str = native_compile_expr(s, ts.value)
+                    d_key: str = native_compile_expr(s, ts.slice)
+                    boxed_v: str = str_format("mp_val_int((int64_t)(%s))", val.data)
+                    if d_vt == "double":
+                        boxed_v = str_format("mp_val_float(%s)", val.data)
+                    _emit(s, str_format("mp_dict_set(%s, %s, %s);", d_obj.data, d_key.data, boxed_v.data))
+                    continue
         tgt: str = native_compile_expr(s, tgt_node)
         _emit(s, str_format("%s = %s;", tgt.data, val.data))
 
@@ -396,8 +406,13 @@ def native_compile_ann_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
         list_name: str = strmap_get(addr_of(s.typed_lists), elem_t)
         if list_name is not None:
             list_type: str = list_name + "*"
-            # Always use TypedListName_new() for typed lists
             _emit(s, str_format("%s %s = %s_new();", list_type.data, vn.id.data, list_name.data))
+            # List literal: [1, 2, 3] → append each element
+            if p.value is not None and p.value.tag == TAG_LIST:
+                p_list: ptr[AstList] = p.value.data
+                for li in range(p_list.elts.count):
+                    lv: str = native_compile_expr(s, p_list.elts.items[li])
+                    _emit(s, str_format("%s_append(%s, %s);", list_name.data, vn.id.data, lv.data))
             strmap_set(addr_of(s.local_vars), vn.id, list_type)
             strmap_set(addr_of(s.list_vars), vn.id, elem_t)
         else:
@@ -425,6 +440,44 @@ def native_compile_ann_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
             _emit(s, str_format("static %s %s;", actual.data, vn.id.data))
         strmap_set(addr_of(s.local_vars), vn.id, actual)
         return
+
+    # Dict[K, V] — track types and handle dict literals
+    if ctype == "MpDict*" and p.annotation is not None and p.annotation.tag == TAG_SUBSCRIPT:
+        ann_d: ptr[AstSubscript] = p.annotation.data
+        d_base: ptr[AstNode] = ann_d.value
+        if d_base is not None and d_base.tag == TAG_NAME:
+            d_bn: ptr[AstName] = d_base.data
+            if d_bn.id == "dict":
+                d_sl: ptr[AstNode] = ann_d.slice
+                if d_sl is not None and d_sl.tag == TAG_TUPLE:
+                    d_tup: ptr[AstTuple] = d_sl.data
+                    if d_tup.elts.count == 2:
+                        dk_type: str = native_map_type(d_tup.elts.items[0])
+                        dv_type: str = native_map_type(d_tup.elts.items[1])
+                        # Store K,V types using local_vars convention
+                        strmap_set(addr_of(s.local_vars), "__dict_K_" + vn.id, dk_type)
+                        strmap_set(addr_of(s.local_vars), "__dict_V_" + vn.id, dv_type)
+                        # Dict literal: {} or {"k": v, ...}
+                        _emit(s, str_format("MpDict* %s = mp_dict_new();", vn.id.data))
+                        if p.value is not None and p.value.tag == TAG_DICT:
+                            p_dict: ptr[AstDict] = p.value.data
+                            for di in range(p_dict.keys.count):
+                                dk_expr: str = native_compile_expr(s, p_dict.keys.items[di])
+                                dv_expr: str = native_compile_expr(s, p_dict.values.items[di])
+                                # Key: use .data for char* if MpStr*
+                                if dk_type == "MpStr*":
+                                    dk_key: ptr[AstNode] = p_dict.keys.items[di]
+                                    if dk_key.tag == TAG_CONSTANT:
+                                        dkc: ptr[AstConstant] = dk_key.data
+                                        if dkc.kind == CONST_STR:
+                                            dk_expr = native_compile_expr(s, dk_key)
+                                # Box value
+                                boxed_dv: str = str_format("mp_val_int((int64_t)(%s))", dv_expr.data)
+                                if dv_type == "double":
+                                    boxed_dv = str_format("mp_val_float(%s)", dv_expr.data)
+                                _emit(s, str_format("mp_dict_set(%s, %s, %s);", vn.id.data, dk_expr.data, boxed_dv.data))
+                        strmap_set(addr_of(s.local_vars), vn.id, ctype)
+                        return
 
     # String literal optimization: str = "literal" → stack MpStr
     if ctype == "MpStr*" and p.value is not None and p.value.tag == TAG_CONSTANT:
@@ -511,6 +564,42 @@ def native_compile_for(s: ptr[CompilerState], node: ptr[AstNode]) -> void:
                     s.indent = s.indent - 1
                     _emit(s, str_new("}"))
                     return
+        # dict iteration: for k, v in d.items()
+        if tgt_tup.elts.count == 2 and p.iter is not None and p.iter.tag == TAG_CALL:
+            di_call: ptr[AstCall] = p.iter.data
+            if di_call.func is not None and di_call.func.tag == TAG_ATTRIBUTE:
+                di_attr: ptr[AstAttribute] = di_call.func.data
+                if di_attr.attr == "items" and di_attr.value is not None and di_attr.value.tag == TAG_NAME:
+                    di_obj: ptr[AstName] = di_attr.value.data
+                    di_dk: str = strmap_get(addr_of(s.local_vars), "__dict_K_" + di_obj.id)
+                    di_dv: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + di_obj.id)
+                    if di_dk is not None and di_dv is not None:
+                        k_node: ptr[AstNode] = tgt_tup.elts.items[0]
+                        v_node: ptr[AstNode] = tgt_tup.elts.items[1]
+                        if k_node.tag == TAG_NAME and v_node.tag == TAG_NAME:
+                            kn: ptr[AstName] = k_node.data
+                            vn2: ptr[AstName] = v_node.data
+                            di_idx: str = str_format("_di_%s", di_obj.id.data)
+                            _emit(s, str_format("for (int64_t %s = 0; %s < %s->cap; %s++) {", di_idx.data, di_idx.data, di_obj.id.data, di_idx.data))
+                            s.indent = s.indent + 1
+                            _emit(s, str_format("if (!%s->entries[%s].used) continue;", di_obj.id.data, di_idx.data))
+                            # Key: char* → MpStr* if key type is MpStr*
+                            if di_dk == "MpStr*":
+                                _emit(s, str_format("MpStr* %s = mp_str_new(%s->entries[%s].key);", kn.id.data, di_obj.id.data, di_idx.data))
+                            else:
+                                _emit(s, str_format("char* %s = %s->entries[%s].key;", kn.id.data, di_obj.id.data, di_idx.data))
+                            # Value: unbox based on value type
+                            if di_dv == "double":
+                                _emit(s, str_format("double %s = mp_as_float(%s->entries[%s].val);", vn2.id.data, di_obj.id.data, di_idx.data))
+                            else:
+                                _emit(s, str_format("%s %s = mp_as_int(%s->entries[%s].val);", di_dv.data, vn2.id.data, di_obj.id.data, di_idx.data))
+                            strmap_set(addr_of(s.local_vars), kn.id, di_dk)
+                            strmap_set(addr_of(s.local_vars), vn2.id, di_dv)
+                            for di_i in range(p.body.count):
+                                native_compile_stmt(s, p.body.items[di_i])
+                            s.indent = s.indent - 1
+                            _emit(s, str_new("}"))
+                            return
         _emit(s, str_new("/* unsupported tuple for target */"))
         return
     if p.target is None or p.target.tag != TAG_NAME:

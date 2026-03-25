@@ -154,6 +154,9 @@ def native_map_type(node: ptr[AstNode]) -> str:
             if name == "typed_list" or name == "list":
                 return str_new("__typed_list__")
 
+            if name == "dict":
+                return str_new("MpDict*")
+
             if name == "ptr":
                 inner: str = native_map_type(p4.slice)
                 return inner + "*"

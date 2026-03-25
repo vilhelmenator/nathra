@@ -8,7 +8,8 @@ from micropy import alloc, free
 from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstAttribute
 from ast_nodes import AstSubscript, AstTuple, AstList, AstSet, AstBinOp
 from ast_nodes import AstUnaryOp, AstBoolOp, AstCompare, AstCall, AstIfExp
-from ast_nodes import AstListComp, AstLambda, AstJoinedStr
+from ast_nodes import AstListComp, AstLambda, AstJoinedStr, AstFormattedValue
+from ast_nodes import TAG_FORMATTED_VAL, CONST_BOOL, CONST_INT, CONST_FLOAT, CONST_STR
 from ast_nodes import TAG_CONSTANT, TAG_NAME, TAG_BIN_OP, TAG_UNARY_OP
 from ast_nodes import TAG_BOOL_OP, TAG_COMPARE, TAG_CALL, TAG_ATTRIBUTE
 from ast_nodes import TAG_SUBSCRIPT, TAG_IF_EXP, TAG_TUPLE, TAG_LIST
@@ -18,7 +19,7 @@ from ast_nodes import OP_ADD, OP_SUB, OP_MULT, OP_DIV, OP_MOD, OP_POW, OP_FLOOR_
 from ast_nodes import OP_LSHIFT, OP_RSHIFT, OP_BIT_OR, OP_BIT_XOR, OP_BIT_AND
 from ast_nodes import OP_UADD, OP_USUB, OP_NOT, OP_INVERT
 from ast_nodes import OP_AND, OP_OR
-from ast_nodes import OP_EQ, OP_NOT_EQ, OP_LT, OP_LT_E, OP_GT, OP_GT_E, OP_IS, OP_IS_NOT
+from ast_nodes import OP_EQ, OP_NOT_EQ, OP_LT, OP_LT_E, OP_GT, OP_GT_E, OP_IS, OP_IS_NOT, OP_IN, OP_NOT_IN
 from strmap import StrMap, StrSet, strmap_get, strmap_has, strset_has
 from native_compiler_state import CompilerState, FieldList, field_list_find
 from native_infer import native_infer_type, _strip_ptr, _ends_with_star
@@ -112,9 +113,9 @@ def _emit(s: ptr[CompilerState], line: str) -> void:
     """Emit a line of C code to the output buffer."""
     # Write indent
     for i in range(s.indent):
-        mp_write_str(s.lines, str_new("    "))
-    mp_write_str(s.lines, line)
-    mp_write_str(s.lines, str_new("\n"))
+        mp_write_text(s.lines, str_new("    "))
+    mp_write_text(s.lines, line)
+    mp_write_text(s.lines, str_new("\n"))
 
 # ── compile_expr ────────────────────────────────────────────────────────
 
@@ -157,12 +158,23 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
     # ── 4.2: BinOp ──────────────────────────────────────────────────
     if node.tag == TAG_BIN_OP:
         p3: ptr[AstBinOp] = node.data
-        # String concatenation
+        # String concatenation with auto-coercion of literals
         if p3.op == OP_ADD:
             lt: str = native_infer_type(s, p3.left)
             if lt == "MpStr*":
                 left: str = native_compile_expr(s, p3.left)
                 right: str = native_compile_expr(s, p3.right)
+                # Auto-coerce string literals on either side
+                if p3.left.tag == TAG_CONSTANT:
+                    lc: ptr[AstConstant] = p3.left.data
+                    if lc.kind == CONST_STR and lc.str_val is not None:
+                        esc_l: str = _escape_str(lc.str_val)
+                        left = str_format("(&(MpStr){.data=(char*)\"%s\",.len=%lld})", esc_l.data, str_len(lc.str_val))
+                if p3.right.tag == TAG_CONSTANT:
+                    rc: ptr[AstConstant] = p3.right.data
+                    if rc.kind == CONST_STR and rc.str_val is not None:
+                        esc_r: str = _escape_str(rc.str_val)
+                        right = str_format("(&(MpStr){.data=(char*)\"%s\",.len=%lld})", esc_r.data, str_len(rc.str_val))
                 return str_format("mp_str_concat(%s, %s)", left.data, right.data)
         # Operator overloading
         lt2: str = native_infer_type(s, p3.left)
@@ -222,12 +234,25 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
     # ── 4.3: Compare ────────────────────────────────────────────────
     if node.tag == TAG_COMPARE:
         p6: ptr[AstCompare] = node.data
-        # String == / != comparison
+        # String == / != comparison with auto-coercion
         if p6.op_count == 1 and p6.comparators.count == 1:
             lt3: str = native_infer_type(s, p6.left)
             if lt3 == "MpStr*":
                 left4: str = native_compile_expr(s, p6.left)
                 right4: str = native_compile_expr(s, p6.comparators.items[0])
+                # Auto-coerce string literals
+                cmp_node: ptr[AstNode] = p6.comparators.items[0]
+                if cmp_node.tag == TAG_CONSTANT:
+                    cmp_c: ptr[AstConstant] = cmp_node.data
+                    if cmp_c.kind == CONST_STR and cmp_c.str_val is not None:
+                        esc_c: str = _escape_str(cmp_c.str_val)
+                        right4 = str_format("(&(MpStr){.data=(char*)\"%s\",.len=%lld})", esc_c.data, str_len(cmp_c.str_val))
+                left_node: ptr[AstNode] = p6.left
+                if left_node.tag == TAG_CONSTANT:
+                    left_c: ptr[AstConstant] = left_node.data
+                    if left_c.kind == CONST_STR and left_c.str_val is not None:
+                        esc_lc: str = _escape_str(left_c.str_val)
+                        left4 = str_format("(&(MpStr){.data=(char*)\"%s\",.len=%lld})", esc_lc.data, str_len(left_c.str_val))
                 if p6.ops[0] == OP_EQ:
                     return str_format("mp_str_eq(%s, %s)", left4.data, right4.data)
                 if p6.ops[0] == OP_NOT_EQ:
@@ -244,6 +269,31 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
                         left5: str = native_compile_expr(s, p6.left)
                         right5: str = native_compile_expr(s, p6.comparators.items[0])
                         return str_format("%s(&(%s), %s)", cmname.data, left5.data, right5.data)
+        # `in` / `not in` operator for lists and dicts
+        if p6.op_count == 1 and (p6.ops[0] == OP_IN or p6.ops[0] == OP_NOT_IN):
+            cmp_r: ptr[AstNode] = p6.comparators.items[0]
+            if cmp_r is not None and cmp_r.tag == TAG_NAME:
+                cmp_rn: ptr[AstName] = cmp_r.data
+                # Dict: check __dict_V_ marker
+                dv_check: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + cmp_rn.id)
+                if dv_check is not None:
+                    in_obj: str = native_compile_expr(s, cmp_r)
+                    in_key: str = native_compile_expr(s, p6.left)
+                    in_expr: str = str_format("mp_dict_has(%s, %s)", in_obj.data, in_key.data)
+                    if p6.ops[0] == OP_NOT_IN:
+                        in_expr = str_format("(!%s)", in_expr.data)
+                    return in_expr
+                # List: check list_vars
+                l_check: str = strmap_get(addr_of(s.list_vars), cmp_rn.id)
+                if l_check is not None:
+                    in_obj2: str = native_compile_expr(s, cmp_r)
+                    in_val: str = native_compile_expr(s, p6.left)
+                    in_boxed: str = str_format("mp_val_int((int64_t)(%s))", in_val.data)
+                    in_expr2: str = str_format("mp_list_contains(%s, %s)", in_obj2.data, in_boxed.data)
+                    if p6.ops[0] == OP_NOT_IN:
+                        in_expr2 = str_format("(!%s)", in_expr2.data)
+                    return in_expr2
+
         # General comparison (possibly chained)
         left6: str = native_compile_expr(s, p6.left)
         result2: str = str_new("")
@@ -291,6 +341,17 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
                     lst: str = native_compile_expr(s, p9.value)
                     idx: str = native_compile_expr(s, p9.slice)
                     return str_format("%s_get(%s, %s)", sub_ln.data, lst.data, idx.data)
+        # Dict subscript read: d["key"] → unbox(dict_get(d, key))
+        if p9.value is not None and p9.value.tag == TAG_NAME:
+            d_n: ptr[AstName] = p9.value.data
+            d_vt: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + d_n.id)
+            if d_vt is not None:
+                d_obj: str = native_compile_expr(s, p9.value)
+                d_key: str = native_compile_expr(s, p9.slice)
+                d_raw: str = str_format("mp_dict_get(%s, %s)", d_obj.data, d_key.data)
+                if d_vt == "double":
+                    return str_format("mp_as_float(%s)", d_raw.data)
+                return str_format("mp_as_int(%s)", d_raw.data)
         val: str = native_compile_expr(s, p9.value)
         sl: str = native_compile_expr(s, p9.slice)
         return str_format("%s[%s]", val.data, sl.data)
@@ -309,6 +370,101 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         if _ends_with_star(obj_type):
             return str_format("%s->%s", val2.data, attr_name.data)
         return str_format("%s.%s", val2.data, attr_name.data)
+
+    # ── F-string (JoinedStr) ────────────────────────────────────────
+    if node.tag == TAG_JOINED_STR:
+        js: ptr[AstJoinedStr] = node.data
+        fmt: str = str_new("")
+        args: str = str_new("")
+        for i in range(js.values.count):
+            part: ptr[AstNode] = js.values.items[i]
+            if part.tag == TAG_CONSTANT:
+                pc: ptr[AstConstant] = part.data
+                if pc.kind == CONST_STR and pc.str_val is not None:
+                    # Escape for C string: \, ", newline, tab, %
+                    slen: i64 = str_len(pc.str_val)
+                    for ci in range(slen):
+                        ch: u8 = cast(u8, pc.str_val.data[ci])
+                        if ch == 92:
+                            fmt = fmt + "\\\\"
+                        elif ch == 34:
+                            fmt = fmt + "\\\""
+                        elif ch == 10:
+                            fmt = fmt + "\\n"
+                        elif ch == 9:
+                            fmt = fmt + "\\t"
+                        elif ch == 37:
+                            fmt = fmt + "%%"
+                        else:
+                            buf2: ptr[byte] = alloc(2)
+                            buf2[0] = ch
+                            buf2[1] = 0
+                            fmt = str_concat(fmt, str_new(buf2))
+                            free(buf2)
+            elif part.tag == TAG_FORMATTED_VAL:
+                fv: ptr[AstFormattedValue] = part.data
+                expr: str = native_compile_expr(s, fv.value)
+                t: str = native_infer_type(s, fv.value)
+                # Extract format spec
+                spec: str = str_new("")
+                if fv.format_spec is not None and fv.format_spec.tag == TAG_JOINED_STR:
+                    sp_js: ptr[AstJoinedStr] = fv.format_spec.data
+                    for si in range(sp_js.values.count):
+                        sp_part: ptr[AstNode] = sp_js.values.items[si]
+                        if sp_part.tag == TAG_CONSTANT:
+                            sp_c: ptr[AstConstant] = sp_part.data
+                            if sp_c.kind == CONST_STR and sp_c.str_val is not None:
+                                spec = str_concat(spec, sp_c.str_val)
+                if str_len(spec) > 0:
+                    # Get last char of spec
+                    spec_last: u8 = cast(u8, spec.data[str_len(spec) - 1])
+                    if (spec_last == 100 or spec_last == 105) and (t == "int64_t" or t == "int" or t == "uint8_t"):
+                        # d/i with integer → widen to long long
+                        spec_prefix: str = str_slice(spec, 0, str_len(spec) - 1)
+                        fmt = str_concat(fmt, str_concat(str_concat(str_new("%"), spec_prefix), str_new("lld")))
+                        args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                    elif (spec_last == 120 or spec_last == 88) and (t == "int64_t" or t == "int" or t == "uint8_t"):
+                        # x/X with integer → widen to long long
+                        spec_prefix2: str = str_slice(spec, 0, str_len(spec) - 1)
+                        last_ch_buf: ptr[byte] = alloc(2)
+                        last_ch_buf[0] = spec_last
+                        last_ch_buf[1] = 0
+                        last_ch_str: str = str_new(last_ch_buf)
+                        free(last_ch_buf)
+                        fmt = str_concat(fmt, str_concat(str_concat(str_concat(str_new("%"), spec_prefix2), str_new("ll")), last_ch_str))
+                        args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                    elif spec_last == 102 and t == "double":
+                        # f with double → use as-is
+                        fmt = str_concat(fmt, str_concat(str_new("%"), spec))
+                        args = str_concat(args, str_format(", %s", expr.data))
+                    else:
+                        fmt = str_concat(fmt, str_concat(str_new("%"), spec))
+                        args = str_concat(args, str_format(", %s", expr.data))
+                elif t == "double":
+                    fmt = fmt + "%g"
+                    args = str_concat(args, str_format(", %s", expr.data))
+                elif t == "int64_t":
+                    fmt = fmt + "%lld"
+                    args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                elif t == "uint8_t":
+                    fmt = fmt + "%u"
+                    args = str_concat(args, str_format(", (unsigned)(%s)", expr.data))
+                elif t == "int":
+                    fmt = fmt + "%d"
+                    args = str_concat(args, str_format(", (int)(%s)", expr.data))
+                elif t == "MpStr*":
+                    fmt = fmt + "%.*s"
+                    args = str_concat(args, str_format(", (int)((%s)->len), ((%s)->data)", expr.data, expr.data))
+                else:
+                    fmt = fmt + "%lld"
+                    args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+        # Emit snprintf + stack MpStr*
+        s.fstr_counter = s.fstr_counter + 1
+        buf_name: str = str_format("_fstr_%d", s.fstr_counter)
+        svar_name: str = str_format("_fstr_s_%d", s.fstr_counter)
+        _emit(s, str_format("char %s[512]; snprintf(%s, 512, \"%s\"%s);", buf_name.data, buf_name.data, fmt.data, args.data))
+        _emit(s, str_format("MpStr %s = {.data=%s,.len=strlen(%s)}; ", svar_name.data, buf_name.data, buf_name.data))
+        return str_format("(&%s)", svar_name.data)
 
     # ── Call dispatch (forward declared above, linked from native_codegen_call)
     if node.tag == TAG_CALL:

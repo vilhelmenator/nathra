@@ -84,7 +84,12 @@ class ExprMixin:
                 if left_type == "MpStr*":
                     left = self.compile_expr(node.left)
                     right = self.compile_expr(node.right)
-                    # Auto-coerce string literal on the right side
+                    # Auto-coerce string literals on either side
+                    if (isinstance(node.left, ast.Constant)
+                            and isinstance(node.left.value, str)):
+                        _s = node.left.value
+                        _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                        left = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
                     if (isinstance(node.right, ast.Constant)
                             and isinstance(node.right.value, str)):
                         _s = node.right.value

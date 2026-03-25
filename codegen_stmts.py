@@ -13,9 +13,7 @@ _WIDE_INT_TYPES = frozenset({"int64_t", "int", "uint64_t"})
 
 # Allocation primitives shared with the ownership analysis in compiler.py
 _ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc",
-                          "list_new", "dict_new", "str_new", "str_concat",
-                          "str_format", "str_upper", "str_lower", "str_slice",
-                          "str_repeat", "str_strip", "str_lstrip", "str_rstrip"})
+                          "list_new", "dict_new"})
 # Raw byte allocators — only these are eligible for alloca substitution
 _RAW_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
 _FREE_FUNCS  = frozenset({"free",  "mp_free",

@@ -10,7 +10,7 @@ from ast_nodes import AstSubscript, AstTuple, AstBinOp, AstUnaryOp, AstBoolOp
 from ast_nodes import AstCompare, AstCall, AstIfExp, AstListComp, AstReturn
 from ast_nodes import TAG_CONSTANT, TAG_NAME, TAG_BIN_OP, TAG_UNARY_OP
 from ast_nodes import TAG_BOOL_OP, TAG_COMPARE, TAG_CALL, TAG_ATTRIBUTE
-from ast_nodes import TAG_SUBSCRIPT, TAG_IF_EXP, TAG_LIST_COMP
+from ast_nodes import TAG_SUBSCRIPT, TAG_IF_EXP, TAG_LIST_COMP, TAG_JOINED_STR
 from ast_nodes import CONST_NONE
 from strmap import StrMap, strmap_get, strmap_has
 from native_compiler_state import CompilerState, FieldList, field_list_find
@@ -148,6 +148,10 @@ def native_infer_type(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
     if node.tag == TAG_IF_EXP:
         p7: ptr[AstIfExp] = node.data
         return native_infer_type(s, p7.body)
+
+    # JoinedStr (f-string) → MpStr*
+    if node.tag == TAG_JOINED_STR:
+        return str_new("MpStr*")
 
     # ListComp → MpList*
     if node.tag == TAG_LIST_COMP:
