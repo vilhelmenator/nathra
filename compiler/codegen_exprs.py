@@ -1,7 +1,7 @@
 import ast
 import sys
 
-from type_map import TYPE_MAP, mangle_type
+from compiler.type_map import TYPE_MAP, mangle_type
 
 # str_* functions whose MpStr* arguments accept bare string literals via auto-coercion
 _STR_OBJ_FUNCS = frozenset({
@@ -716,7 +716,7 @@ class ExprMixin:
     def _call_sizeof(self, node):
         arg = node.args[0]
         if isinstance(arg, ast.Name):
-            from type_map import TYPE_MAP
+            from compiler.type_map import TYPE_MAP
             mapped = TYPE_MAP.get(arg.id, arg.id)
             return f"sizeof({mapped})"
         return f"sizeof({self.compile_expr(arg)})"
@@ -757,7 +757,7 @@ class ExprMixin:
         if fname in cast_map:
             return f"(({cast_map[fname]})({arg_str}))"
         if fname == "cast" and len(node.args) == 2:
-            from type_map import map_type as _mt
+            from compiler.type_map import map_type as _mt
             cast_type = _mt(node.args[0])
             cast_val = self.compile_expr(node.args[1])
             return f"(({cast_type})({cast_val}))"
@@ -846,7 +846,7 @@ class ExprMixin:
             ap = self.compile_expr(node.args[0])
             return f"va_end({ap})"
         if fname == "va_arg":
-            from type_map import map_type as _map_type
+            from compiler.type_map import map_type as _map_type
             ap = self.compile_expr(node.args[0])
             T = _map_type(node.args[1])
             return f"va_arg({ap}, {T})"

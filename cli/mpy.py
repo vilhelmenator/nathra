@@ -24,17 +24,60 @@ import argparse
 import time
 
 import shutil
-from compiler import Compiler, CompileError
-from build import run_build_file
+import ctypes
+from ctypes import c_int64, c_int32, POINTER, byref, c_uint8
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+from compiler import Compiler, CompileError
+from lib.build import run_build_file
+
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _find_native_dylib():
+    """Find the native compiler dylib, return path or None."""
+    ext = "dylib" if sys.platform == "darwin" else ("dll" if sys.platform == "win32" else "so")
+    path = os.path.join(_HERE, "build", f"compiler_native.{ext}")
+    if os.path.exists(path):
+        return path
+    return None
+
+
+def _compile_native(source: str, dylib_path: str):
+    """Compile source using the native compiler. Returns C source string or None on failure."""
+    try:
+        import ast
+        from compiler.ast_serial import serialize_ast
+
+        source_pp = source.replace("\nstruct ", "\nclass ")
+        if source_pp.startswith("struct "):
+            source_pp = "class " + source_pp[7:]
+        source_pp = source_pp.replace("\nunion ", "\n@union\nclass ")
+
+        tree = ast.parse(source_pp)
+        ast_buf = serialize_ast(tree)
+
+        lib = ctypes.CDLL(dylib_path)
+        func = lib.native_compile
+        func.argtypes = [POINTER(c_uint8), c_int64, POINTER(POINTER(c_uint8)), POINTER(c_int64)]
+        func.restype = c_int32
+
+        buf = (c_uint8 * len(ast_buf))(*ast_buf)
+        out_buf = POINTER(c_uint8)()
+        out_len = c_int64(0)
+
+        rc = func(buf, c_int64(len(ast_buf)), byref(out_buf), byref(out_len))
+        if rc != 0:
+            return None
+        return bytes(out_buf[:out_len.value]).decode("utf-8", errors="replace")
+    except Exception:
+        return None
 
 
 def build_once(args, source_dir) -> bool:
     """Compile and link. Returns True on success, False on failure."""
     for _hdr in ("micropy_rt.h", "micropy_types.h"):
         _dst = os.path.join(source_dir, _hdr)
-        _src = os.path.join(_HERE, _hdr)
+        _src = os.path.join(_HERE, "runtime", _hdr)
         if not os.path.exists(_dst) or os.path.getmtime(_src) >= os.path.getmtime(_dst):
             shutil.copy2(_src, _dst)
 

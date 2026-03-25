@@ -762,19 +762,230 @@ Work items:
  4. Dict subscript syntax             (d["k"] = v, v = d["k"])
  5. Typed dict[K, V]                  (auto box/unbox)
  6. Dict literals                     ({...} sugar)
- 7. `in` operator for list and dict
- 8. Dict iteration                    (for k, v in d.items())
- 9. List slicing and concatenation
-10. Auto-defer for str/list/dict      (extend escape analysis)
+ 7. Safety: division by zero          (smallest standalone check, proves the flag plumbing)
+ 8. Safety: null analysis (static)    (three-value lattice, compile errors for provably-null — always on)
+ 9. Safety: null checks (runtime)     (emit checks for `unknown` state under --safe)
+10. Safety: out of bounds             (array + list)
+11. Safety: integer overflow           (__builtin_*_overflow wrappers)
+12. `in` operator for list and dict
+13. Dict iteration                    (for k, v in d.items())
+14. List slicing and concatenation
+15. Auto-defer for str/list/dict      (extend escape analysis)
 ```
 
 Items 1–3 are the highest leverage — they cover the most common verbosity
 pain points and each is a self-contained compiler change. Items 4–6 build
-on each other. Item 10 is a cross-cutting improvement that benefits all
-three types.
+on each other. Items 7–11 are the safety tier: division by zero first to
+prove the `--safe` flag plumbing end-to-end, then null analysis in two
+stages — static analysis (item 8) is always-on and catches provably-null
+dereferences as compile errors with zero runtime cost, then runtime checks
+(item 9) handle the `unknown` cases under `--safe`. Item 15 is a
+cross-cutting improvement that benefits all three built-in types.
 
 Each item is independently testable by comparing generated C output between
 the Python and native compiler paths, same strategy used for the bootstrap.
+
+---
+
+## Safety checks (`--safe`)
+
+Runtime safety checks, all gated behind a `--safe` compiler flag. When the
+flag is absent, zero overhead — no checks emitted. This follows the existing
+three-tier build model: `debug` (safe + assertions), `release` (no checks),
+`unsafe` (no checks, no bounds, raw pointers).
+
+The flag controls a compile-time `#define MP_SAFE` that guards every check.
+Each check compiles to a single branch that calls a `__attribute__((cold,
+noreturn))` handler — the hot path stays branchless and inlineable.
+
+### Division by zero
+
+Every integer division and modulo (`/`, `//`, `%`) is wrapped:
+
+```python
+# source
+x: int = a / b
+
+# emitted (--safe)
+x = mp_safe_div_i64(a, b, __FILE__, __LINE__);
+
+# emitted (release)
+x = a / b;
+```
+
+The runtime helper is trivial — check `b == 0`, call the cold abort path.
+Float division is left unchecked (IEEE 754 produces `inf`/`nan` which is
+well-defined and sometimes intentional).
+
+### Null pointer dereference
+
+Static analysis first, runtime checks only where the compiler can't prove
+safety. The compiler tracks a nullability state for every `ptr[T]` variable
+through the control flow graph using a three-value lattice:
+
+| State | Meaning | Action at dereference |
+|-------|---------|----------------------|
+| `non-null` | Provably safe | No check emitted |
+| `null` | Provably null | **Compile error** |
+| `unknown` | Can't prove either way | Runtime check (`--safe` only) |
+
+**Provably non-null** — no check needed:
+
+```python
+p: ptr[int] = alloc(8)          # alloc → non-null
+v: int = deref(p)               # safe, no check
+
+q: ptr[Node] = addr_of(node)   # addr_of → non-null
+r: ptr[Vec2] = Vec2(1.0, 2.0)  # constructor → non-null
+
+if p is not None:
+    deref(p)                    # guarded → non-null in this branch
+```
+
+Sources of `non-null`: `alloc()`, `addr_of()` / `ref()`, constructor calls,
+non-null literal assignment, and control-flow guards (`if p is not None`).
+
+**Provably null** — compile error:
+
+```python
+p: ptr[int] = None
+deref(p)                        # ERROR: dereference of provably null pointer
+```
+
+```
+sma_study.mpy:12: error: dereference of provably null pointer 'p'
+    note: assigned None at line 11
+```
+
+This catches the obvious bugs at compile time — no flag needed, always active.
+
+**Unknown** — runtime check under `--safe`:
+
+```python
+def process(p: ptr[Node]) -> void:   # parameter: could be anything
+    v: int = p.value                 # unknown → runtime check
+
+# emitted (--safe)
+mp_safe_deref_check(p, __FILE__, __LINE__);
+v = p->value;
+```
+
+Sources of `unknown`: function parameters (public API boundary), return
+values from functions that might return `None`, pointer fields loaded from
+structs, and variables assigned in only one branch of a conditional.
+
+**Narrowing through control flow:**
+
+```python
+def find(head: ptr[Node], key: int) -> ptr[Node]:  # head is unknown
+    cur: ptr[Node] = head
+    while cur is not None:        # loop guard narrows cur to non-null
+        if cur.key == key:        # no check needed — cur is non-null here
+            return cur
+        cur = cur.next            # next is unknown (struct field load)
+    return None                   # cur is null here
+```
+
+The analysis propagates through `if`/`elif`/`else`, `while` guards, early
+`return`, and `match`/`case`. It joins branches at merge points: `non-null`
++ `null` = `unknown`, `non-null` + `non-null` = `non-null`, etc.
+
+**Whole-program callsite narrowing (optional, later):** If every callsite of
+a function passes a provably non-null argument for a parameter, the parameter
+can be promoted to `non-null` without a check. This is the same analysis
+pattern as the existing cold-function inference — walk all callsites, intersect
+the argument states. This is a second-pass optimization; the per-function
+local analysis comes first.
+
+**Implementation:** Runs as a dataflow pass after escape analysis (Phase 6),
+since it needs the same reaching-definitions information. Conservative by
+default — anything unproven is `unknown` and gets a runtime check under
+`--safe`, so correctness doesn't depend on the analysis being complete. As
+the analysis improves over time, runtime checks silently disappear from the
+generated code.
+
+### Out of bounds
+
+Array and list subscript access (`arr[i]`, `lst[i]`) is bounds-checked:
+
+```python
+# source — array[int, 64]
+v: int = arr[i]
+
+# emitted (--safe)
+mp_safe_bounds_check(i, 64, __FILE__, __LINE__);
+v = arr[i];
+
+# source — list[int]
+v: int = nums[i]
+
+# emitted (--safe)
+mp_safe_bounds_check(i, nums->len, __FILE__, __LINE__);
+v = ...;
+```
+
+For `array[T, N]` the bound is a compile-time constant so the check is a
+single comparison. For `list[T]` it reads the length field. Negative indices
+are always out of bounds (no Python-style wraparound — this is systems code).
+
+`ptr[T]` raw pointer arithmetic (`p[i]`) is **not** bounds-checked — there is
+no length to check against. This is the escape hatch for code that needs raw
+access.
+
+### Integer overflow
+
+Arithmetic on `int` (`i64`) and the explicit-width types (`i32`, `u16`, etc.)
+is checked for overflow on `+`, `-`, `*`:
+
+```python
+# source
+c: int = a + b
+
+# emitted (--safe)
+c = mp_safe_add_i64(a, b, __FILE__, __LINE__);
+```
+
+Implementation uses GCC/Clang `__builtin_add_overflow` /
+`__builtin_mul_overflow` — these compile to a single `jo` (jump on overflow)
+instruction on x86 and equivalent flag checks on ARM. This is cheaper than
+upcasting to 128-bit because:
+
+- The overflow flag is a free byproduct of the ALU operation.
+- No widening, no extra registers, no narrowing on the result path.
+- The builtins work for all width types (`i8` through `i64`, `u8` through
+  `u64`) without needing per-width upcast logic.
+
+The 128-bit upcast approach would only be needed for `i64 * i64` where the
+mathematical result exceeds 64 bits and you want the actual wide result.
+For overflow *detection* (which is all the safety flag needs), the builtins
+are strictly better.
+
+Division overflow (`INT64_MIN / -1`) is caught by the division-by-zero
+wrapper — it checks both `b == 0` and the `MIN / -1` edge case.
+
+### Error messages
+
+All safety handlers print the `.mpy` source file and line (via `#line`
+directives already emitted by the compiler), not the generated C location:
+
+```
+sma_study.mpy:42: division by zero
+sma_study.mpy:17: null pointer dereference
+sma_study.mpy:31: index 64 out of bounds (size 64)
+sma_study.mpy:55: integer overflow in multiplication
+```
+
+### CLI
+
+```sh
+python3 mpy.py program.mpy --safe              # enable all safety checks
+python3 mpy.py program.mpy --safe --run        # safe + run
+python3 mpy.py program.mpy                     # release: no checks (default)
+```
+
+The `--safe` flag can be combined with `--flags="-O2"` — the checks are
+branch-predicted-not-taken and cold-pathed, so the performance cost with
+optimization is typically under 2% for compute-heavy code.
 
 ---
 

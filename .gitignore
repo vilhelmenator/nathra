@@ -1,9 +1,13 @@
 __pycache__/
 *.pyc
 
-# Generated C files
+# Build artifacts
+build/
+
+# Generated C files from compilation (not native/generated/ — those are tracked)
 tests/*.c
 *.c
+!native/generated/*.c
 
 # Compiled test binaries (no extension on macOS/Linux)
 tests/test_*

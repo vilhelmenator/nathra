@@ -7,7 +7,7 @@ from typing import List
 
 from compiler import Compiler, CompileError
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ def run_build_file(build_path: str, cc: str = "gcc", platform: str = "all"):
     build_dir = os.path.dirname(os.path.abspath(build_path))
 
     rt_path = os.path.join(build_dir, "micropy_rt.h")
-    src_rt = os.path.join(_HERE, "micropy_rt.h")
+    src_rt = os.path.join(_HERE, "runtime", "micropy_rt.h")
     if not os.path.exists(rt_path) or os.path.getmtime(src_rt) > os.path.getmtime(rt_path):
         shutil.copy2(src_rt, rt_path)
 

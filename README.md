@@ -2,6 +2,8 @@
 
 A Python-syntax compiler that targets C. Write systems code in a clean, typed Python dialect — get fast, portable C out the other side.
 
+The compiler includes a bootstrapped native backend — written in micropy itself — that compiles orders of magnitude faster than the Python implementation. See [Bootstrap performance](#bootstrap-performance) for benchmarks.
+
 ```python
 struct Vec2:
     x: float
@@ -23,16 +25,17 @@ def main() -> void:
 ## Quick start
 
 ```sh
-python3 mpy.py program.mpy                        # compile + link
-python3 mpy.py program.mpy --run                  # compile, link, run
-python3 mpy.py program.mpy --emit-c               # emit C only
-python3 mpy.py program.mpy --shared               # compile to shared library (.so/.dylib/.dll)
-python3 mpy.py build.mpy                          # run a project build script
-python3 mpy.py program.mpy --watch                # rebuild on save
-python3 mpy.py program.mpy --flags="-O2 -march=native"   # extra compiler/linker flags
-python3 mpy.py program.mpy --flags="-lssl -lz"           # link extra libraries
-python3 mpy.py program.mpy --no-line-directives           # omit #line directives from C output
-python3 snekc.py                                          # interactive REPL
+make                                                      # build the native compiler (~2 sec)
+python3 cli/mpy.py program.mpy                            # compile + link
+python3 cli/mpy.py program.mpy --run                      # compile, link, run
+python3 cli/mpy.py program.mpy --emit-c                   # emit C only
+python3 cli/mpy.py program.mpy --shared                   # compile to shared library (.so/.dylib/.dll)
+python3 cli/mpy.py build.mpy                              # run a project build script
+python3 cli/mpy.py program.mpy --watch                    # rebuild on save
+python3 cli/mpy.py program.mpy --flags="-O2 -march=native"   # extra compiler/linker flags
+python3 cli/mpy.py program.mpy --flags="-lssl -lz"           # link extra libraries
+python3 cli/mpy.py program.mpy --no-line-directives           # omit #line directives from C output
+python3 cli/snekc.py                                          # interactive REPL
 ```
 
 ## Language reference
@@ -798,7 +801,7 @@ def get_state() -> int:
 ```
 
 ```sh
-python3 mpy.py game_logic.mpy --shared   # → game_logic.so / .dylib / .dll
+python3 cli/mpy.py game_logic.mpy --shared   # → game_logic.so / .dylib / .dll
 ```
 
 The compiler auto-generates a `MpApi` vtable struct and a `get_api()` entry point:
@@ -845,7 +848,7 @@ def main() -> void:
 `snekc` is a live REPL that compiles each line through micropy → C → native code:
 
 ```sh
-python3 snekc.py
+python3 cli/snekc.py
 ```
 
 ```
@@ -876,7 +879,7 @@ lib("mylib",   sources=["mylib.mpy"],          kind="static")
 lib("plugin",  sources=["plugin.mpy"],         kind="shared")
 ```
 
-Run with `python3 mpy.py build.mpy`.
+Run with `python3 cli/mpy.py build.mpy`.
 
 **Incremental builds** — the compiler embeds the source mtime as `/* mpy_stamp: ... */` in every generated `.c` file, including the max mtime of all transitively imported modules. The build runner reads this stamp and skips recompilation when the source is unchanged, without relying on filesystem timestamps.
 
@@ -1022,6 +1025,26 @@ cd bench
 python3 run_opts.py
 ```
 
+## Bootstrap performance
+
+The native compiler is written in micropy and compiles itself. Self-compilation benchmark — the native compiler compiling its own 8 source modules (3,380 lines) to C:
+
+| Module | Python | Native | Speedup |
+|--------|--------|--------|---------|
+| native_analysis.mpy | 117.9 ms | 0.20 ms | 595x |
+| native_compile_file.mpy | 459.1 ms | 0.78 ms | 587x |
+| native_infer.mpy | 124.2 ms | 0.26 ms | 478x |
+| native_type_map.mpy | 124.0 ms | 0.28 ms | 438x |
+| native_codegen_stmt.mpy | 347.6 ms | 1.01 ms | 344x |
+| native_codegen_call.mpy | 247.2 ms | 0.85 ms | 290x |
+| native_codegen_expr.mpy | 190.5 ms | 0.66 ms | 289x |
+| native_compiler_state.mpy | 35.5 ms | 0.14 ms | 253x |
+| **Total** | **1,646 ms** | **4.18 ms** | **394x** |
+
+The native compiler compiles all 3,380 lines of its own source in under 5 milliseconds. Total compile time becomes dominated by `gcc`, which is the correct steady state — the compiler should never be slower than the C compiler it feeds.
+
+See [BOOTSTRAP.md](BOOTSTRAP.md) for the full bootstrap roadmap and architecture.
+
 ## Generated header rules
 
 Generated `.h` files include only `micropy_types.h` — a minimal header containing forward declarations, `stdint.h`, and `stddef.h`. They never include `micropy_rt.h`, `stdio.h`, `pthread.h`, or any other heavy header.
@@ -1032,21 +1055,44 @@ This means including a micropy module header in C++ or C code never silently pul
 
 ## Project structure
 
-| File               | Purpose                                  |
-|--------------------|------------------------------------------|
-| `mpy.py`           | CLI entry point                          |
-| `compiler.py`      | Front-end: parse, first-pass, emit glue  |
-| `codegen_stmts.py` | Statement code generation                |
-| `codegen_exprs.py` | Expression code generation               |
-| `type_map.py`      | Type annotation → C type mapping         |
-| `build.py`         | Build script interpreter                 |
-| `snekc.py`         | Interactive REPL shell                   |
-| `micropy_types.h`  | Forward declarations only — safe to include from any generated header |
-| `micropy_rt.h`     | Full runtime: strings, lists, dicts, I/O, concurrency, … |
-| `micropy_test.h`   | Test runner infrastructure               |
-| `micropy.py`       | IDE stubs — add `from micropy import *` to suppress linter warnings |
-| `bench/bench.mpy`        | Basic benchmark suite (Python vs micropy)                   |
-| `bench/run.py`           | Build + run basic benchmark, print speedup table            |
-| `bench/bench_opts.mpy`   | Optimization contrast benchmark (Python + micropy)          |
-| `bench/bench_opts_naive.c` | Same 7 algorithms in idiomatic C without micropy optimizations |
-| `bench/run_opts.py`      | Build + run all three variants, print 7-row comparison table |
+```
+micropy/
+  Makefile                          Build the native compiler dylib
+  compiler/                         Python compiler (stage 0)
+    compiler.py                       Front-end: parse, first-pass, emit glue
+    codegen_stmts.py                  Statement code generation
+    codegen_exprs.py                  Expression code generation
+    type_map.py                       Type annotation → C type mapping
+    ast_serial.py                     Binary AST serializer
+  cli/                              User-facing tools
+    mpy.py                            CLI entry point
+    snekc.py                          Interactive REPL shell
+    micropy.py                        IDE stubs (from micropy import *)
+  runtime/                          C headers shipped with the project
+    micropy_rt.h                      Full runtime: strings, lists, dicts, I/O, concurrency
+    micropy_types.h                   Forward declarations — safe to include from any header
+    micropy_test.h                    Test runner infrastructure
+  native/                           Bootstrap native compiler (394x faster)
+    src/                              .mpy source for the native compiler
+    generated/                        Pre-generated .c/.h — just run make
+  lib/
+    build.py                          Build script interpreter
+  scripts/
+    regenerate.py                     Regenerate native/generated/ from .mpy sources
+    bootstrap_test.py                 Bootstrap verification
+  build/                            Build artifacts (gitignored)
+    compiler_native.dylib             Native compiler shared library
+  tests/                            Test suite (43 tests)
+  bench/                            Benchmarks
+  examples/                         Example programs
+```
+
+### Build targets
+
+```sh
+make                    # build native compiler from pre-generated C (~2 sec)
+make regenerate         # regenerate C from .mpy sources (needs Python compiler)
+make test               # run the test suite
+make bootstrap          # run bootstrap verification
+make clean              # remove build artifacts
+```

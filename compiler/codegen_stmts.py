@@ -3,7 +3,7 @@ import copy
 import os
 import sys
 
-from type_map import map_type, _tuple_field_type, get_array_info, get_typed_list_elem, get_funcptr_info, get_vec_info, get_bitfield_info, TUPLE_RET_MAP
+from compiler.type_map import map_type, _tuple_field_type, get_array_info, get_typed_list_elem, get_funcptr_info, get_vec_info, get_bitfield_info, TUPLE_RET_MAP
 
 
 _NARROW_INT_TYPES = frozenset({
@@ -415,7 +415,7 @@ class StmtMixin:
 
     def _scan_and_emit_lambdas(self, stmts):
         """Pre-scan statements for lambda expressions, emit static functions before enclosing function."""
-        from type_map import get_funcptr_info
+        from compiler.type_map import get_funcptr_info
         import ast as _ast
 
         def walk_stmts(nodes):

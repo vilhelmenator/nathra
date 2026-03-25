@@ -2,25 +2,11 @@
 #define NATIVE_CODEGEN_STMT_H
 #include "micropy_types.h"
 #include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
 #include "strmap.h"
 #include "native_compiler_state.h"
 #include "native_infer.h"
 #include "native_codegen_expr.h"
 #include "native_type_map.h"
-#include "ast_nodes.h"
 void native_codegen_stmt__emit(CompilerState* restrict s, const MpStr* restrict line);
 void native_codegen_stmt_native_compile_stmt(CompilerState* restrict s, AstNode* restrict node);
 void native_codegen_stmt_native_compile_assert(CompilerState* restrict s, const AstNode* restrict node);

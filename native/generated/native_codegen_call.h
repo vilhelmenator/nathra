@@ -2,8 +2,6 @@
 #define NATIVE_CODEGEN_CALL_H
 #include "micropy_types.h"
 #include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
 #include "strmap.h"
 #include "native_compiler_state.h"
 #include "native_infer.h"

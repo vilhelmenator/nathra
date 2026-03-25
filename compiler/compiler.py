@@ -6,10 +6,10 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
-from type_map import TYPE_MAP, ALIAS_MAP, TUPLE_RET_MAP, map_type, mangle_type, get_array_info, get_typed_list_elem, gen_typed_list, get_funcptr_info
-import type_map as _type_map_mod
-from codegen_stmts import StmtMixin, _ALLOC_FUNCS, _FREE_FUNCS, _ptr_is_written
-from codegen_exprs import ExprMixin
+from compiler.type_map import TYPE_MAP, ALIAS_MAP, TUPLE_RET_MAP, map_type, mangle_type, get_array_info, get_typed_list_elem, gen_typed_list, get_funcptr_info
+import compiler.type_map as _type_map_mod
+from compiler.codegen_stmts import StmtMixin, _ALLOC_FUNCS, _FREE_FUNCS, _ptr_is_written
+from compiler.codegen_exprs import ExprMixin
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -870,7 +870,7 @@ class Compiler(StmtMixin, ExprMixin):
 
             # Result helpers
             if fname == "Ok" and len(node.args) == 1:
-                from type_map import mangle_type as _mangle
+                from compiler.type_map import mangle_type as _mangle
                 inner = self.infer_type(node.args[0])
                 return f"Result_{_mangle(inner)}"
             if fname in ("Err",):
@@ -2207,7 +2207,7 @@ class Compiler(StmtMixin, ExprMixin):
 
     def _scan_tuple_returns(self, tree):
         """Scan for functions with tuple return types and populate TUPLE_RET_MAP."""
-        import type_map as _tm
+        import compiler.type_map as _tm
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.returns:
                 if isinstance(node.returns, ast.Tuple):
@@ -2216,7 +2216,7 @@ class Compiler(StmtMixin, ExprMixin):
 
     def _emit_tuple_ret_structs(self):
         """Emit C structs for all tuple return types found during scan."""
-        import type_map as _tm
+        import compiler.type_map as _tm
         for key, struct_name in _tm.TUPLE_RET_MAP.items():
             self.emit(f"typedef struct {{")
             self.indent += 1
@@ -2780,7 +2780,7 @@ class Compiler(StmtMixin, ExprMixin):
 
     def _make_prototype(self, node: ast.FunctionDef, module_name: str) -> str | None:
         """Build a C function prototype string (without trailing semicolon)."""
-        from type_map import get_funcptr_info as _gfp
+        from compiler.type_map import get_funcptr_info as _gfp
         ret_type = map_type(node.returns)
         if ret_type == "__typed_list__":
             _rt_elem = get_typed_list_elem(node.returns)
@@ -2823,7 +2823,7 @@ class Compiler(StmtMixin, ExprMixin):
         }
         _restrict_params: set = set()
         if len(_all_ptr_params) >= 2:
-            from codegen_stmts import _aliasing_ptr_params as _app
+            from compiler.codegen_stmts import _aliasing_ptr_params as _app
             _aliased = _app(node.body, _all_ptr_params)
             _restrict_params = _all_ptr_params - _aliased
         final_args = []
@@ -2861,7 +2861,7 @@ class Compiler(StmtMixin, ExprMixin):
     def _ensure_test_header(self):
         """Copy micropy_test.h next to the source if missing or stale."""
         out_dir = self.source_dir or "."
-        src = os.path.join(_HERE, "micropy_test.h")
+        src = os.path.join(_HERE, "..", "runtime", "micropy_test.h")
         dst = os.path.join(out_dir, "micropy_test.h")
         if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
             shutil.copy2(src, dst)

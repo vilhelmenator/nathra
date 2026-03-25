@@ -19,9 +19,9 @@ import sys
 import tempfile
 
 from compiler import Compiler, CompileError
-from type_map import map_type
+from compiler.type_map import map_type
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # C type → ctypes mapping for state transfer
 _CTYPE_MAP = {
@@ -64,7 +64,7 @@ class ReplState:
 
         # Copy runtime headers to tmpdir
         for hdr in ("micropy_rt.h", "micropy_types.h"):
-            src = os.path.join(_HERE, hdr)
+            src = os.path.join(_HERE, "runtime", hdr)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(self.tmpdir, hdr))
 

@@ -2,8 +2,6 @@
 #define NATIVE_TYPE_MAP_H
 #include "micropy_types.h"
 #include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
 #include "strmap.h"
 typedef struct TypeEntry TypeEntry;
 struct TypeEntry {

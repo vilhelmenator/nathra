@@ -9,8 +9,8 @@ import ctypes
 from ctypes import c_char_p, c_int64, c_int32, POINTER, byref, c_uint8
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(__file__))
-from ast_serial import serialize_ast
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from compiler.ast_serial import serialize_ast
 from compiler import Compiler
 
 
@@ -69,9 +69,11 @@ def compile_with_native(source: str, lib_path: str) -> str:
 
 
 def main():
-    lib_path = "/tmp/bootstrap/compiler_native.dylib"
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lib_ext = "dylib" if sys.platform == "darwin" else "so"
+    lib_path = os.path.join(_root, "build", f"compiler_native.{lib_ext}")
     if not os.path.exists(lib_path):
-        print(f"Error: {lib_path} not found. Build it first.")
+        print(f"Error: {lib_path} not found. Run 'make' first.")
         sys.exit(1)
 
     # Test with a simple program
@@ -91,7 +93,8 @@ def main() -> int:
 
     # Compile with Python
     # Write temp file for Python compiler
-    tmp_path = "/tmp/bootstrap/test_input.mpy"
+    os.makedirs(os.path.join(_root, "build"), exist_ok=True)
+    tmp_path = os.path.join(_root, "build", "test_input.mpy")
     with open(tmp_path, "w") as f:
         f.write(test_source)
 

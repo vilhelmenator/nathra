@@ -2,13 +2,6 @@
 #define NATIVE_ANALYSIS_H
 #include "micropy_types.h"
 #include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "ast_nodes.h"
-#include "strmap.h"
 #include "strmap.h"
 #include "native_compiler_state.h"
 int64_t native_analysis__is_alloc_func(const MpStr* name);
