@@ -15,6 +15,23 @@ _STR_OBJ_FUNCS = frozenset({
 
 class ExprMixin:
     # -------------------------------------------------------------------
+    # Dict key helpers
+    # -------------------------------------------------------------------
+
+    def _dict_key_expr(self, node, key_type: str) -> str:
+        """Compile a dict key expression to char* for the runtime API.
+        String literals → bare "literal", MpStr* variables → var->data."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            _s = node.value
+            _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            return f'"{_esc}"'
+        compiled = self.compile_expr(node)
+        if key_type == "MpStr*":
+            # MpStr* variable → extract .data for char* API
+            return f"({compiled})->data"
+        return compiled
+
+    # -------------------------------------------------------------------
     # Expressions
     # -------------------------------------------------------------------
 
@@ -54,12 +71,25 @@ class ExprMixin:
             return name
 
         if isinstance(node, ast.BinOp):
+            # List + concatenation
+            if isinstance(node.op, ast.Add):
+                left_type = self.infer_type(node.left)
+                if left_type == "MpList*":
+                    left = self.compile_expr(node.left)
+                    right = self.compile_expr(node.right)
+                    return f"mp_list_concat({left}, {right})"
             # String + concatenation
             if isinstance(node.op, ast.Add):
                 left_type = self.infer_type(node.left)
                 if left_type == "MpStr*":
                     left = self.compile_expr(node.left)
                     right = self.compile_expr(node.right)
+                    # Auto-coerce string literal on the right side
+                    if (isinstance(node.right, ast.Constant)
+                            and isinstance(node.right.value, str)):
+                        _s = node.right.value
+                        _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                        right = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
                     return f"mp_str_concat({left}, {right})"
             # Operator overloading via __add__, __sub__, etc.
             left_type = self.infer_type(node.left)
@@ -126,6 +156,17 @@ class ExprMixin:
                 if left_type == "MpStr*":
                     left = self.compile_expr(node.left)
                     right = self.compile_expr(node.comparators[0])
+                    # Auto-coerce string literal comparands
+                    _rc = node.comparators[0]
+                    if isinstance(_rc, ast.Constant) and isinstance(_rc.value, str):
+                        _s = _rc.value
+                        _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                        right = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
+                    _lc = node.left
+                    if isinstance(_lc, ast.Constant) and isinstance(_lc.value, str):
+                        _s = _lc.value
+                        _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                        left = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
                     if isinstance(node.ops[0], ast.Eq):
                         return f"mp_str_eq({left}, {right})"
                     if isinstance(node.ops[0], ast.NotEq):
@@ -146,6 +187,38 @@ class ExprMixin:
                         left = self.compile_expr(node.left)
                         right = self.compile_expr(node.comparators[0])
                         return f"{_method}(&({left}), {right})"
+            # `in` / `not in` operator for lists and dicts
+            if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+                _comp = node.comparators[0]
+                _comp_type = self.infer_type(_comp)
+                # List `in`: linear scan via loop
+                if _comp_type == "MpList*" or (isinstance(_comp, ast.Name)
+                        and _comp.id in self._list_vars):
+                    _lobj = self.compile_expr(_comp)
+                    _lval = self.compile_expr(node.left)
+                    _lvt = self.infer_type(node.left)
+                    if _lvt == "double":
+                        _boxed = f"mp_val_float({_lval})"
+                    elif _lvt == "MpStr*":
+                        _boxed = f"mp_val_str({_lval})"
+                    else:
+                        _boxed = f"mp_val_int((int64_t)({_lval}))"
+                    # Use a helper — emit inline scan
+                    # For now, use list_contains if available, else val comparison
+                    _expr = f"mp_list_contains({_lobj}, {_boxed})"
+                    if isinstance(node.ops[0], ast.NotIn):
+                        _expr = f"(!{_expr})"
+                    return _expr
+                if isinstance(_comp, ast.Name):
+                    _dinfo = getattr(self, '_dict_vars', {}).get(_comp.id)
+                    if _dinfo:
+                        _dk_type, _dv_type = _dinfo
+                        _dobj = self.compile_expr(_comp)
+                        _dkey = self._dict_key_expr(node.left, _dk_type)
+                        expr = f"mp_dict_has({_dobj}, {_dkey})"
+                        if isinstance(node.ops[0], ast.NotIn):
+                            expr = f"(!{expr})"
+                        return expr
             left = self.compile_expr(node.left)
             parts = []
             prev = left
@@ -160,6 +233,16 @@ class ExprMixin:
             return self.compile_call(node)
 
         if isinstance(node, ast.Subscript):
+            # Slice: a[start:stop] — handle before other subscript dispatch
+            if isinstance(node.slice, ast.Slice):
+                _sobj = self.compile_expr(node.value)
+                _stype = self.infer_type(node.value)
+                _slow = self.compile_expr(node.slice.lower) if node.slice.lower else "0"
+                _sup = self.compile_expr(node.slice.upper) if node.slice.upper else f"{_sobj}->len"
+                if _stype == "MpList*":
+                    return f"mp_list_slice({_sobj}, {_slow}, {_sup})"
+                # For arrays/pointers: return pointer + offset
+                return f"({_sobj} + {_slow})"
             # @soa: standalone whole-element subscript on SoA array is unsupported
             if (isinstance(node.value, ast.Name)
                     and node.value.id in self._soa_vars):
@@ -189,6 +272,15 @@ class ExprMixin:
                     elif et:
                         return f"(({et})mp_as_int({raw}))"
                 return raw
+            # Dict subscript read: d["key"] → _dict_unbox_val(dict_get(d, "key"))
+            if isinstance(node.value, ast.Name):
+                _dinfo = getattr(self, '_dict_vars', {}).get(node.value.id)
+                if _dinfo:
+                    _dk_type, _dv_type = _dinfo
+                    _dobj = self.compile_expr(node.value)
+                    _dkey = self._dict_key_expr(node.slice, _dk_type)
+                    _raw = f"mp_dict_get({_dobj}, {_dkey})"
+                    return self._dict_unbox_val(_raw, _dv_type)
             val = self.compile_expr(node.value)
             sl = self.compile_expr(node.slice)
             return f"{val}[{sl}]"
@@ -255,7 +347,10 @@ class ExprMixin:
             buf = f"_fstr_{self._fstr_counter}"
             arg_str = f', {", ".join(args)}' if args else ""
             self.emit(f'char {buf}[512]; snprintf({buf}, 512, "{fmt}"{arg_str});')
-            return buf
+            # Return as stack MpStr* so it works with str-typed variables
+            svar = f"_fstr_s_{self._fstr_counter}"
+            self.emit(f'MpStr {svar} = {{.data={buf},.len=strlen({buf})}}; ')
+            return f"(&{svar})"
 
         if isinstance(node, ast.List):
             elts = ", ".join(self.compile_expr(e) for e in node.elts)
@@ -338,6 +433,27 @@ class ExprMixin:
                             node.args.append(defaults[i])
 
         args = [self.compile_expr(a) for a in node.args]
+
+        # Auto-coerce string literal arguments to MpStr* when the callee expects it.
+        # Check each arg: if it's a string constant and the corresponding param
+        # type is MpStr*, wrap it as a stack compound literal.
+        if isinstance(node.func, ast.Name):
+            _callee = node.func.id
+            # Look up callee param types (works for user functions and struct methods)
+            _ptypes = self.func_param_types.get(_callee)
+            if _ptypes is None and _callee in self.from_imports:
+                _mod, _real = self.from_imports[_callee]
+                _ptypes = self.func_param_types.get(f"{_mod}_{_real}")
+            if _ptypes:
+                for _pi, _arg_node in enumerate(node.args):
+                    if (_pi < len(_ptypes)
+                            and _ptypes[_pi] == "MpStr*"
+                            and isinstance(_arg_node, ast.Constant)
+                            and isinstance(_arg_node.value, str)):
+                        _s = _arg_node.value
+                        _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                        args[_pi] = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
+
         arg_str = ", ".join(args)
 
         if isinstance(node.func, ast.Name):
@@ -781,6 +897,13 @@ class ExprMixin:
             return f"{obj.id}_{attr}({arg_str})"
         obj_str = self.compile_expr(obj)
         obj_type = self.infer_type(obj)
+
+        # Auto-coerce string literal to MpStr* for method calls
+        if (isinstance(obj, ast.Constant) and isinstance(obj.value, str)):
+            _s = obj.value
+            _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            obj_str = f'(&(MpStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
+            obj_type = "MpStr*"
 
         # Generated typed list dispatch (struct element types, no boxing)
         if isinstance(obj, ast.Name):

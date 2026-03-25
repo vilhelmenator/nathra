@@ -12,8 +12,14 @@ _NARROW_INT_TYPES = frozenset({
 _WIDE_INT_TYPES = frozenset({"int64_t", "int", "uint64_t"})
 
 # Allocation primitives shared with the ownership analysis in compiler.py
-_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
-_FREE_FUNCS  = frozenset({"free",  "mp_free"})
+_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc",
+                          "list_new", "dict_new", "str_new", "str_concat",
+                          "str_format", "str_upper", "str_lower", "str_slice",
+                          "str_repeat", "str_strip", "str_lstrip", "str_rstrip"})
+# Raw byte allocators — only these are eligible for alloca substitution
+_RAW_ALLOC_FUNCS = frozenset({"alloc", "alloc_safe", "mp_alloc"})
+_FREE_FUNCS  = frozenset({"free",  "mp_free",
+                          "list_free", "dict_free", "str_free"})
 
 # Scalar/small types that should NOT be lifetime-scoped (stack slot reuse is
 # already handled by the C compiler's register allocator for these).
@@ -173,6 +179,45 @@ def _is_pure_expr(node) -> bool:
 
 
 class StmtMixin:
+    # -------------------------------------------------------------------
+    # Dict auto-boxing helpers
+    # -------------------------------------------------------------------
+
+    def _auto_free_fn(self, ctype: str, name: str) -> str:
+        """Return the correct free() call for a given type."""
+        if ctype == "MpStr*":
+            return f"mp_str_free({name})"
+        if ctype == "MpList*":
+            return f"mp_list_free({name})"
+        if ctype == "MpDict*":
+            return f"mp_dict_free({name})"
+        # Typed lists: IntList*, FloatList*, etc.
+        if ctype.endswith("*"):
+            base = ctype[:-1]
+            if base.endswith("List"):
+                return f"{base}_free({name})"
+        return f"free({name})"
+
+    def _dict_box_val(self, compiled: str, node, val_type: str) -> str:
+        """Box a value for dict_set based on the V type of dict[K, V]."""
+        if val_type == "int64_t":
+            return f"mp_val_int((int64_t)({compiled}))"
+        if val_type == "double":
+            return f"mp_val_float({compiled})"
+        if val_type == "MpStr*":
+            return f"mp_val_str({compiled})"
+        return f"mp_val_int((int64_t)({compiled}))"
+
+    def _dict_unbox_val(self, compiled: str, val_type: str) -> str:
+        """Unbox a value from dict_get based on the V type of dict[K, V]."""
+        if val_type == "int64_t":
+            return f"mp_as_int({compiled})"
+        if val_type == "double":
+            return f"mp_as_float({compiled})"
+        if val_type == "MpStr*":
+            return f"(MpStr*)(uintptr_t)mp_as_int({compiled})"
+        return f"mp_as_int({compiled})"
+
     # -------------------------------------------------------------------
     # Enum detection
     # -------------------------------------------------------------------
@@ -637,6 +682,11 @@ class StmtMixin:
             self._scan_and_emit_cold_branches(node, module_name)
             self._scan_and_emit_specializations(node, module_name)
         ret_type = map_type(node.returns)
+        # Resolve __typed_list__ return type
+        if ret_type == "__typed_list__":
+            _rt_elem = get_typed_list_elem(node.returns)
+            _rt_name = self.typed_lists.get(_rt_elem, "MpList")
+            ret_type = f"{_rt_name}*"
         self.current_func_ret_type = ret_type
         args = []
         self.func_args = {}
@@ -673,6 +723,12 @@ class StmtMixin:
                     if hasattr(self, '_funcptr_rettypes'):
                         self._funcptr_rettypes[arg.arg] = ret
                     continue
+            # Resolve typed_list[T] to actual TypedList* type
+            if atype == "__typed_list__":
+                elem_t = get_typed_list_elem(arg.annotation)
+                list_name = self.typed_lists.get(elem_t, "MpList")
+                atype = f"{list_name}*"
+                self._list_vars[arg.arg] = elem_t
             # Read-only inference: ptr param never written through → const T*
             # Applied to both prototype and definition so they stay in sync.
             # Types whose fields are mutated through opaque runtime function calls —
@@ -753,7 +809,7 @@ class StmtMixin:
                     and _stmt.value
                     and isinstance(_stmt.value, ast.Call)
                     and isinstance(_stmt.value.func, ast.Name)
-                    and _stmt.value.func.id in _ALLOC_FUNCS
+                    and _stmt.value.func.id in _RAW_ALLOC_FUNCS
                     and len(_stmt.value.args) == 1
                     and isinstance(_stmt.value.args[0], ast.Constant)
                     and isinstance(_stmt.value.args[0].value, int)
@@ -782,7 +838,7 @@ class StmtMixin:
                     and _stmt.value
                     and isinstance(_stmt.value, ast.Call)
                     and isinstance(_stmt.value.func, ast.Name)
-                    and _stmt.value.func.id in _ALLOC_FUNCS
+                    and _stmt.value.func.id in _RAW_ALLOC_FUNCS
                     and len(_stmt.value.args) == 1
                     and isinstance(_stmt.value.args[0], ast.Constant)
                     and isinstance(_stmt.value.args[0].value, int)
@@ -999,6 +1055,7 @@ class StmtMixin:
         self._array_vars = {}
         self._list_vars = {}
         self._vec_vars = {}
+        self._dict_vars = {}  # varname → (key_ctype, val_ctype)
         self._auto_free_vars = set()
         self._str_literal_vars = set()
         self._merged_alloc_offsets = {}
@@ -1187,11 +1244,51 @@ class StmtMixin:
             self.local_vars[name] = ctype
             self._list_vars[name] = elem_t
             if node.value:
-                val = self.compile_expr(node.value)
-                self.emit(f"{ctype} {name} = {val};")
+                # List literal: [1, 2, 3] → TypedList_new() + append for each
+                if isinstance(node.value, ast.List):
+                    self.emit(f"{ctype} {name} = {list_name}_new();")
+                    for elt in node.value.elts:
+                        val = self.compile_expr(elt)
+                        self.emit(f"{list_name}_append({name}, {val});")
+                else:
+                    val = self.compile_expr(node.value)
+                    self.emit(f"{ctype} {name} = {val};")
             else:
                 self.emit(f"{ctype} {name} = NULL;")
+            # Auto-defer for local-only typed lists
+            if name in self._auto_free_vars and hasattr(self, 'defer_stack'):
+                self.defer_stack.append(f"{list_name}_free({name})")
             return
+
+        # Track dict[K, V] type info for subscript auto-boxing
+        if ctype == "MpDict*" and isinstance(annotation, ast.Subscript):
+            _dbase = annotation.value
+            if isinstance(_dbase, ast.Name) and _dbase.id == "dict":
+                _dsl = annotation.slice
+                if isinstance(_dsl, ast.Tuple) and len(_dsl.elts) == 2:
+                    _dk = map_type(_dsl.elts[0])
+                    _dv = map_type(_dsl.elts[1])
+                    if not hasattr(self, '_dict_vars'):
+                        self._dict_vars = {}
+                    self._dict_vars[name] = (_dk, _dv)
+            # Dict literal: {} → dict_new(), {k: v, ...} → dict_new() + dict_set
+            if node.value and isinstance(node.value, ast.Dict):
+                self.local_vars[name] = ctype
+                self.emit(f"MpDict* {name} = mp_dict_new();")
+                for _di, (_dkey, _dval) in enumerate(zip(node.value.keys, node.value.values)):
+                    _kv_info = getattr(self, '_dict_vars', {}).get(name)
+                    _dk_type = _kv_info[0] if _kv_info else "char*"
+                    _dv_type = _kv_info[1] if _kv_info else "int64_t"
+                    _ck = self._dict_key_expr(_dkey, _dk_type)
+                    _cv = self.compile_expr(_dval)
+                    if _kv_info:
+                        _cv = self._dict_box_val(_cv, _dval, _dv_type)
+                    self.emit(f"mp_dict_set({name}, {_ck}, {_cv});")
+                # Auto-defer for local-only dicts
+                if name in self._auto_free_vars and hasattr(self, 'defer_stack'):
+                    self.defer_stack.append(f"mp_dict_free({name})")
+                return
+            # Empty dict: {} handled above, explicit dict_new() call handled below
 
         self.local_vars[name] = ctype
 
@@ -1256,11 +1353,12 @@ class StmtMixin:
                               f" + (int64_t)((sizeof(MpList)+7)&~7));")
                 return
             # Escape-analysis alloc optimizations (local-only pointer, no escape)
+            # Only raw byte allocators are eligible for alloca substitution
             if ((name in self._auto_free_vars
                     or name in getattr(self, '_alloca_consumed_vars', set()))
                     and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name)
-                    and node.value.func.id in _ALLOC_FUNCS
+                    and node.value.func.id in _RAW_ALLOC_FUNCS
                     and len(node.value.args) == 1):
                 _arg = node.value.args[0]
                 # Item 3: allocation merging — part of a merged stack buffer
@@ -1284,12 +1382,13 @@ class StmtMixin:
             val = self.compile_expr(node.value)
             val = self._coerce(val, self.infer_type(node.value), ctype)
             self.emit(f"{ctype} {name} = {val};")
-            # Scope-based auto-free: non-alloc producer calls (e.g. malloc wrappers)
+            # Scope-based auto-free: heap allocations that don't escape
             if (name in self._auto_free_vars
                     and isinstance(node.value, ast.Call)
                     and isinstance(node.value.func, ast.Name)
                     and node.value.func.id in _ALLOC_FUNCS):
-                self.defer_stack.append(f"free({name})")
+                _free_fn = self._auto_free_fn(ctype, name)
+                self.defer_stack.append(_free_fn)
         else:
             self.emit(f"{ctype} {name};")
 
@@ -1419,6 +1518,17 @@ class StmtMixin:
                     else:                boxed = f"mp_val_int((int64_t)({v}))"
                     self.emit(f"mp_list_set({lst}, {idx}, {boxed});")
                     continue
+                # Dict subscript write: d["key"] = val → dict_set(d, key, val_T(val))
+                if isinstance(target.value, ast.Name):
+                    _dinfo = getattr(self, '_dict_vars', {}).get(target.value.id)
+                    if _dinfo:
+                        _dk_type, _dv_type = _dinfo
+                        _dobj = self.compile_expr(target.value)
+                        _dkey = self._dict_key_expr(target.slice, _dk_type)
+                        v = self.compile_expr(val_node)
+                        boxed_v = self._dict_box_val(v, val_node, _dv_type)
+                        self.emit(f"mp_dict_set({_dobj}, {_dkey}, {boxed_v});")
+                        continue
             # Array literal assigned to an existing array variable: emit element-by-element
             if isinstance(val_node, ast.List) and isinstance(target, ast.Name):
                 arr_info = self._array_vars.get(target.id)
@@ -1788,6 +1898,36 @@ class StmtMixin:
             self.indent -= 1
             self.emit("}")
             return
+
+        # dict iteration: for k, v in d.items():
+        if (isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Attribute)
+                and node.iter.func.attr == "items"
+                and isinstance(node.target, ast.Tuple)
+                and len(node.target.elts) == 2):
+            _dobj_node = node.iter.func.value
+            if isinstance(_dobj_node, ast.Name):
+                _dinfo = getattr(self, '_dict_vars', {}).get(_dobj_node.id)
+                if _dinfo:
+                    _dk_type, _dv_type = _dinfo
+                    _dname = _dobj_node.id
+                    _kvar = self.compile_expr(node.target.elts[0])
+                    _vvar = self.compile_expr(node.target.elts[1])
+                    _idx = f"_di_{_dname}"
+                    self.emit(f"for (int64_t {_idx} = 0; {_idx} < {_dname}->cap; {_idx}++) {{")
+                    self.indent += 1
+                    self.emit(f"if (!{_dname}->entries[{_idx}].used) continue;")
+                    # Key: char* → wrap as MpStr* if key type is MpStr*
+                    if _dk_type == "MpStr*":
+                        self.emit(f"MpStr* {_kvar} = mp_str_new({_dname}->entries[{_idx}].key);")
+                    else:
+                        self.emit(f"char* {_kvar} = {_dname}->entries[{_idx}].key;")
+                    self.emit(f"{_dv_type} {_vvar} = {self._dict_unbox_val(f'{_dname}->entries[{_idx}].val', _dv_type)};")
+                    for stmt in node.body:
+                        self.compile_stmt(stmt)
+                    self.indent -= 1
+                    self.emit("}")
+                    return
 
         # zip: for a, b in zip(arr1, arr2):
         if (isinstance(node.iter, ast.Call)

@@ -85,6 +85,8 @@ def map_type(annotation, type_map=None) -> str:
                 return "__array__"
             if base.id in ("typed_list", "list"):
                 return "__typed_list__"
+            if base.id == "dict":
+                return "MpDict*"
             if base.id == "ptr":
                 inner = map_type(annotation.slice, type_map)
                 return f"{inner}*"

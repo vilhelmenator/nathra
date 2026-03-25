@@ -12,7 +12,7 @@ compile_stmt. For now those fall through to a TODO marker.
 from micropy import alloc, free
 from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstCall
 from ast_nodes import AstAttribute, AstSubscript
-from ast_nodes import TAG_NAME, TAG_ATTRIBUTE, TAG_CONSTANT
+from ast_nodes import TAG_NAME, TAG_ATTRIBUTE, TAG_CONSTANT, CONST_STR, AstConstant
 from strmap import StrMap, strmap_get, strmap_has
 from native_compiler_state import CompilerState, FieldList, field_list_find, ArrayInfo
 from native_infer import native_infer_type, _strip_ptr, _ends_with_star
@@ -213,9 +213,17 @@ def native_call_len(s: ptr[CompilerState], node: ptr[AstCall]) -> str:
             return ai.size
         et: str = strmap_get(addr_of(s.list_vars), an.id)
         if et is not None:
+            ln: str = strmap_get(addr_of(s.typed_lists), et)
+            if ln is not None:
+                return str_format("%s_len(%s)", ln.data, arg_expr.data)
             return str_format("%s->len", arg_expr.data)
     # Fallback by inferred type
     t: str = native_infer_type(s, arg)
+    t_base: str = _strip_ptr(t)
+    # __len__ special method
+    len_method: str = str_concat(t_base, str_new("___len__"))
+    if strmap_has(addr_of(s.structs), t_base) and strmap_has(addr_of(s.func_ret_types), len_method):
+        return str_format("%s(&(%s))", len_method.data, arg_expr.data)
     if str_eq(t, str_new("MpStr*")):
         return str_format("mp_str_len(%s)", arg_expr.data)
     if str_eq(t, str_new("MpList*")):
@@ -299,6 +307,20 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         fn: ptr[AstName] = func.data
         fname: str = fn.id
 
+        # test_assert / test_assert_eq
+        if str_eq(fname, str_new("test_assert")):
+            if arg_parts is not None:
+                free(arg_parts)
+            if pc.args.count == 2:
+                cond: str = native_compile_expr(s, pc.args.items[0])
+                msg: str = native_compile_expr(s, pc.args.items[1])
+                return str_format("mp_test_assert_msg(%s, %s)", cond.data, msg.data)
+            return str_format("mp_test_assert(%s)", arg_str.data)
+        if str_eq(fname, str_new("test_assert_eq")):
+            if arg_parts is not None:
+                free(arg_parts)
+            return str_format("mp_test_assert_eq(%s)", arg_str.data)
+
         # Struct constructor
         if strmap_has(addr_of(s.structs), fname):
             r: str = native_call_struct_ctor(s, fname, arg_str)
@@ -352,11 +374,74 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
                 free(arg_parts)
             return str_format("mp_input(%s)", prompt.data)
 
+        # sort(arr, cmp) — qsort wrapper, matching Python's _call_sort
+        if str_eq(fname, str_new("sort")) and pc.args.count == 2:
+            arr_node: ptr[AstNode] = pc.args.items[0]
+            arr_e: str = native_compile_expr(s, arr_node)
+            cmp_e: str = native_compile_expr(s, pc.args.items[1])
+            if arg_parts is not None:
+                free(arg_parts)
+            # Look up array info for size and element type
+            if arr_node.tag == TAG_NAME:
+                arr_n: ptr[AstName] = arr_node.data
+                arr_ai: ptr[ArrayInfo] = strmap_get(addr_of(s.array_vars), arr_n.id)
+                if arr_ai is not None:
+                    return str_format("qsort(%s, %s, sizeof(%s), (int(*)(const void*, const void*))%s)", arr_e.data, arr_ai.size.data, arr_ai.elem_type.data, cmp_e.data)
+            return str_format("qsort(%s, 0, 0, (int(*)(const void*, const void*))%s)", arr_e.data, cmp_e.data)
+
+        # str(x) — convert to MpStr*
+        if str_eq(fname, str_new("str")) and pc.args.count == 1:
+            st: str = native_infer_type(s, pc.args.items[0])
+            se: str = native_compile_expr(s, pc.args.items[0])
+            if arg_parts is not None:
+                free(arg_parts)
+            if str_eq(st, str_new("MpStr*")):
+                return se
+            if str_eq(st, str_new("double")):
+                return str_format("mp_str_from_float(%s)", se.data)
+            return str_format("mp_str_from_int((int64_t)(%s))", se.data)
+
+        # sizeof(T)
+        if str_eq(fname, str_new("sizeof")) and pc.args.count == 1:
+            sarg: ptr[AstNode] = pc.args.items[0]
+            if sarg.tag == TAG_NAME:
+                sn: ptr[AstName] = sarg.data
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("sizeof(%s)", sn.id.data)
+
         # print() — type-dispatched printf
         if str_eq(fname, str_new("print")):
             if arg_parts is not None:
                 free(arg_parts)
             return native_compile_print(s, pc)
+
+        # str_* function coercion: wrap string literal args as stack MpStr*
+        # Matches Python compiler's _STR_OBJ_FUNCS (NOT str_new/str_from_*/str_format)
+        is_str_obj_func: int = 0
+        if str_eq(fname, str_new("str_len")) or str_eq(fname, str_new("str_eq")) or str_eq(fname, str_new("str_concat")) or str_eq(fname, str_new("str_free")):
+            is_str_obj_func = 1
+        if str_eq(fname, str_new("str_contains")) or str_eq(fname, str_new("str_starts_with")) or str_eq(fname, str_new("str_ends_with")):
+            is_str_obj_func = 1
+        if str_eq(fname, str_new("str_slice")) or str_eq(fname, str_new("str_find")) or str_eq(fname, str_new("str_upper")) or str_eq(fname, str_new("str_lower")):
+            is_str_obj_func = 1
+        if str_eq(fname, str_new("str_repeat")) or str_eq(fname, str_new("str_strip")) or str_eq(fname, str_new("str_split")):
+            is_str_obj_func = 1
+        if is_str_obj_func:
+            coerced_parts: str = str_new("")
+            for ci in range(pc.args.count):
+                if ci > 0:
+                    coerced_parts = str_concat(coerced_parts, str_new(", "))
+                ca: ptr[AstNode] = pc.args.items[ci]
+                if ca.tag == TAG_CONSTANT:
+                    cac: ptr[AstConstant] = ca.data
+                    if cac.kind == CONST_STR and cac.str_val is not None:
+                        escaped_c: str = native_compile_expr(s, ca)
+                        slen_c: i64 = str_len(cac.str_val)
+                        coerced_parts = str_concat(coerced_parts, str_format("(&(MpStr){.data=(char*)%s,.len=%lld})", escaped_c.data, slen_c))
+                        continue
+                coerced_parts = str_concat(coerced_parts, native_compile_expr(s, ca))
+            arg_str = coerced_parts
 
         # Builtin table lookup
         c_name: cstr = lookup_builtin(fname)
@@ -383,6 +468,74 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         obj_type: str = native_infer_type(s, pa.value)
         base: str = _strip_ptr(obj_type)
         attr: str = pa.attr
+
+        # MpStr method dispatch — map to mp_str_* functions
+        if str_eq(obj_type, str_new("MpStr*")):
+            c_fn: str = str_format("mp_str_%s", attr.data)
+            all_a: str = obj_str
+            if str_len(arg_str) > 0:
+                all_a = str_format("%s, %s", obj_str.data, arg_str.data)
+            if arg_parts is not None:
+                free(arg_parts)
+            return str_format("%s(%s)", c_fn.data, all_a.data)
+
+        # Typed list method dispatch — check if obj is in list_vars
+        if pa.value is not None and pa.value.tag == TAG_NAME:
+            obj_n: ptr[AstName] = pa.value.data
+            et_lookup: str = strmap_get(addr_of(s.list_vars), obj_n.id)
+            if et_lookup is not None:
+                ln_lookup: str = strmap_get(addr_of(s.typed_lists), et_lookup)
+                if ln_lookup is not None:
+                    c_method: str = str_format("%s_%s", ln_lookup.data, attr.data)
+                    all_tl: str = obj_str
+                    if str_len(arg_str) > 0:
+                        all_tl = str_format("%s, %s", obj_str.data, arg_str.data)
+                    if arg_parts is not None:
+                        free(arg_parts)
+                    return str_format("%s(%s)", c_method.data, all_tl.data)
+
+        # MpList method dispatch
+        if str_eq(obj_type, str_new("MpList*")):
+            if str_eq(attr, str_new("append")) and pc.args.count == 1:
+                v: str = native_compile_expr(s, pc.args.items[0])
+                vt: str = native_infer_type(s, pc.args.items[0])
+                boxed: str = v
+                if str_eq(vt, str_new("double")):
+                    boxed = str_format("mp_val_float(%s)", v.data)
+                elif str_eq(vt, str_new("MpStr*")):
+                    boxed = str_format("mp_val_str(%s)", v.data)
+                else:
+                    boxed = str_format("mp_val_int((int64_t)(%s))", v.data)
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_list_append(%s, %s)", obj_str.data, boxed.data)
+            if str_eq(attr, str_new("pop")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_list_pop(%s)", obj_str.data)
+            if str_eq(attr, str_new("len")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_list_len(%s)", obj_str.data)
+
+        # MpFile method dispatch
+        if str_eq(obj_type, str_new("MpFile")):
+            if str_eq(attr, str_new("write")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_file_write(%s, %s)", obj_str.data, arg_str.data)
+            if str_eq(attr, str_new("write_line")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_file_write_line(%s, %s)", obj_str.data, arg_str.data)
+            if str_eq(attr, str_new("read")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_file_read_all(%s)", obj_str.data)
+            if str_eq(attr, str_new("close")):
+                if arg_parts is not None:
+                    free(arg_parts)
+                return str_format("mp_file_close(%s)", obj_str.data)
 
         # Struct method call
         if strmap_has(addr_of(s.structs), base):

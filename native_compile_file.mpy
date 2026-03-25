@@ -11,11 +11,12 @@ Simplified for initial bootstrap — handles the core compilation path:
 """
 
 from micropy import alloc, free
-from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstCall
+from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstCall, CONST_ELLIPSIS, TAG_CONSTANT
 from ast_nodes import AstModule, AstFunctionDef, AstClassDef, AstAnnAssign
 from ast_nodes import AstAssign, AstAttribute, AstExprStmt, AstArg, AstArguments
 from ast_nodes import TAG_MODULE, TAG_FUNCTION_DEF, TAG_CLASS_DEF, TAG_ANN_ASSIGN
 from ast_nodes import TAG_ASSIGN, TAG_EXPR_STMT, TAG_NAME, TAG_CALL, TAG_ATTRIBUTE
+from ast_nodes import AstSubscript, AstTuple, TAG_SUBSCRIPT, TAG_TUPLE
 from ast_nodes import deserialize_ast
 from strmap import StrMap, StrSet, strmap_new, strmap_free, strmap_get, strmap_set, strmap_has
 from strmap import strset_new, strset_add, strset_has
@@ -58,9 +59,23 @@ def _first_pass(s: ptr[CompilerState], body: AstNodeList) -> void:
             strmap_set(addr_of(s.func_ret_types), fd.name, ret_type)
             continue
 
-        # Class definitions (structs)
+        # Class definitions (structs or enums)
         if node.tag == TAG_CLASS_DEF:
             cd: ptr[AstClassDef] = node.data
+            # Detect enum: all members are plain Assign (no AnnAssign)
+            is_enum: int = 1
+            has_assign: int = 0
+            for j in range(cd.body.count):
+                item_check: ptr[AstNode] = cd.body.items[j]
+                if item_check is not None:
+                    if item_check.tag == TAG_ANN_ASSIGN or item_check.tag == TAG_FUNCTION_DEF:
+                        is_enum = 0
+                    if item_check.tag == TAG_ASSIGN:
+                        has_assign = 1
+            if is_enum and has_assign:
+                # Register as enum — store name for later emission
+                strset_add(addr_of(s.extern_funcs), cd.name)  # reuse as enum set
+                continue
             # Collect fields
             field_count: i32 = 0
             for j in range(cd.body.count):
@@ -77,6 +92,29 @@ def _first_pass(s: ptr[CompilerState], body: AstNodeList) -> void:
                         if aa.target is not None and aa.target.tag == TAG_NAME:
                             fn: ptr[AstName] = aa.target.data
                             ft: str = native_map_type(aa.annotation)
+                            # Expand __array__ to "elemtype FIELDNAME[size]" format
+                            # Store as special ctype that _emit_struct_defs can parse
+                            if str_eq(ft, str_new("__array__")):
+                                if aa.annotation is not None and aa.annotation.tag == TAG_SUBSCRIPT:
+                                    asub: ptr[AstSubscript] = aa.annotation.data
+                                    sl: ptr[AstNode] = asub.slice
+                                    if sl is not None and sl.tag == TAG_TUPLE:
+                                        tup: ptr[AstTuple] = sl.data
+                                        if tup.elts.count >= 2:
+                                            et: str = native_map_type(tup.elts.items[0])
+                                            sz: str = native_compile_expr(s, tup.elts.items[1])
+                                            ft = str_format("__arr_%s_%s", et.data, sz.data)
+                            # Expand __bitfield__ to "__bf_TYPE_WIDTH"
+                            if str_eq(ft, str_new("__bitfield__")):
+                                if aa.annotation is not None and aa.annotation.tag == TAG_SUBSCRIPT:
+                                    bf_sub: ptr[AstSubscript] = aa.annotation.data
+                                    bf_sl: ptr[AstNode] = bf_sub.slice
+                                    if bf_sl is not None and bf_sl.tag == TAG_TUPLE:
+                                        bf_tup: ptr[AstTuple] = bf_sl.data
+                                        if bf_tup.elts.count >= 2:
+                                            bf_t: str = native_map_type(bf_tup.elts.items[0])
+                                            bf_w: str = native_compile_expr(s, bf_tup.elts.items[1])
+                                            ft = str_format("__bf_%s_%s", bf_t.data, bf_w.data)
                             fl.entries[idx].name = fn.id
                             fl.entries[idx].ctype = ft
                             idx = idx + 1
@@ -110,10 +148,107 @@ def _first_pass(s: ptr[CompilerState], body: AstNodeList) -> void:
                     strmap_set(addr_of(s.mutable_globals), vn.id, ct)
             continue
 
+# ── Decorator helper ────────────────────────────────────────────────────
+
+def _has_decorator(fd: ptr[AstFunctionDef], name: str) -> int:
+    """Check if a function definition has a decorator with the given name."""
+    for i in range(fd.decorators.count):
+        dec: ptr[AstNode] = fd.decorators.items[i]
+        if dec is not None and dec.tag == TAG_NAME:
+            dn: ptr[AstName] = dec.data
+            if str_eq(dn.id, name):
+                return 1
+    return 0
+
+# ── Typed list scanning ─────────────────────────────────────────────────
+
+def _scan_typed_lists(s: ptr[CompilerState], body: AstNodeList) -> void:
+    """Walk AST to find typed_list[T] annotations and register list types."""
+    for i in range(body.count):
+        node: ptr[AstNode] = body.items[i]
+        if node is None:
+            continue
+        # Check AnnAssign annotations
+        if node.tag == TAG_ANN_ASSIGN:
+            aa: ptr[AstAnnAssign] = node.data
+            if aa.annotation is not None and aa.annotation.tag == TAG_SUBSCRIPT:
+                asub: ptr[AstSubscript] = aa.annotation.data
+                sub_val: ptr[AstNode] = asub.value
+                if sub_val is not None and sub_val.tag == TAG_NAME:
+                    bn: ptr[AstName] = sub_val.data
+                    if str_eq(bn.id, str_new("typed_list")) or str_eq(bn.id, str_new("list")):
+                        elem_t: str = native_map_type(asub.slice)
+                        if strmap_has(addr_of(s.typed_lists), elem_t) == 0:
+                            # Generate name: int64_t→IntList, double→FloatList, etc.
+                            list_name: str = str_concat(elem_t, str_new("List"))
+                            if str_eq(elem_t, str_new("int64_t")):
+                                list_name = str_new("IntList")
+                            elif str_eq(elem_t, str_new("double")):
+                                list_name = str_new("FloatList")
+                            elif str_eq(elem_t, str_new("uint8_t")):
+                                list_name = str_new("ByteList")
+                            strmap_set(addr_of(s.typed_lists), elem_t, list_name)
+        # Also scan inside function bodies
+        if node.tag == TAG_FUNCTION_DEF:
+            fd: ptr[AstFunctionDef] = node.data
+            _scan_typed_lists(s, fd.body)
+        if node.tag == TAG_CLASS_DEF:
+            cd: ptr[AstClassDef] = node.data
+            for j in range(cd.body.count):
+                method: ptr[AstNode] = cd.body.items[j]
+                if method is not None and method.tag == TAG_FUNCTION_DEF:
+                    md: ptr[AstFunctionDef] = method.data
+                    _scan_typed_lists(s, md.body)
+
+def _emit_typed_lists(s: ptr[CompilerState]) -> void:
+    """Emit typed list C code (struct + new/append/get/set/len/pop/free)."""
+    # Iterate typed_lists map - we need to walk the strmap entries
+    m: ptr[StrMap] = addr_of(s.typed_lists)
+    for i in range(m.cap):
+        if m.states[i] == 1:
+            elem_t: str = m.keys[i]
+            list_name: str = m.values[i]
+            N: str = list_name
+            T: str = elem_t
+            _emit_raw(s, str_format("typedef struct { %s* data; int64_t len; int64_t cap; } %s;", T.data, N.data))
+            _emit_raw(s, str_format("static inline %s* %s_new(void) { %s* l = (%s*)malloc(sizeof(%s)); l->cap=8; l->len=0; l->data=(%s*)malloc(sizeof(%s)*l->cap); return l; }", N.data, N.data, N.data, N.data, N.data, T.data, T.data))
+            _emit_raw(s, str_format("static inline void %s_append(%s* l, %s v) { if(l->len>=l->cap){l->cap*=2;l->data=(%s*)realloc(l->data,sizeof(%s)*l->cap);} l->data[l->len++]=v; }", N.data, N.data, T.data, T.data, T.data))
+            _emit_raw(s, str_format("static inline %s %s_get(%s* l, int64_t i) { return l->data[i]; }", T.data, N.data, N.data))
+            _emit_raw(s, str_format("static inline void %s_set(%s* l, int64_t i, %s v) { l->data[i]=v; }", N.data, N.data, T.data))
+            _emit_raw(s, str_format("static inline int64_t %s_len(%s* l) { return l->len; }", N.data, N.data))
+            _emit_raw(s, str_format("static inline %s %s_pop(%s* l) { return l->data[--l->len]; }", T.data, N.data, N.data))
+            _emit_raw(s, str_format("static inline void %s_free(%s* l) { if(l){free(l->data);free(l);} }", N.data, N.data))
+            _emit_raw(s, str_new(""))
+
 # ── Emit C code sections ────────────────────────────────────────────────
 
-def _emit_includes(s: ptr[CompilerState]) -> void:
+def _has_test_funcs(body: AstNodeList) -> int:
+    """Check if any function has @test decorator."""
+    for i in range(body.count):
+        node: ptr[AstNode] = body.items[i]
+        if node is not None and node.tag == TAG_FUNCTION_DEF:
+            fd: ptr[AstFunctionDef] = node.data
+            if _has_decorator(fd, str_new("test")):
+                return 1
+    return 0
+
+def _has_variadic_funcs(body: AstNodeList) -> int:
+    """Check if any function has *args (vararg)."""
+    for i in range(body.count):
+        node: ptr[AstNode] = body.items[i]
+        if node is not None and node.tag == TAG_FUNCTION_DEF:
+            fd: ptr[AstFunctionDef] = node.data
+            args_n: ptr[AstArguments] = fd.args.data
+            if args_n.vararg is not None:
+                return 1
+    return 0
+
+def _emit_includes(s: ptr[CompilerState], body: AstNodeList) -> void:
     _emit_raw(s, str_new("#include \"micropy_rt.h\""))
+    if _has_variadic_funcs(body):
+        _emit_raw(s, str_new("#include <stdarg.h>"))
+    if _has_test_funcs(body):
+        _emit_raw(s, str_new("#include \"micropy_test.h\""))
     _emit_raw(s, str_new(""))
 
 def _emit_forward_typedefs(s: ptr[CompilerState], body: AstNodeList) -> void:
@@ -138,25 +273,88 @@ def _emit_struct_defs(s: ptr[CompilerState], body: AstNodeList) -> void:
             continue
         _emit_raw(s, str_format("typedef struct %s {", cd.name.data))
         for j in range(fl.count):
-            _emit_raw(s, str_format("    %s %s;", fl.entries[j].ctype.data, fl.entries[j].name.data))
+            ftype: str = fl.entries[j].ctype
+            fname: str = fl.entries[j].name
+            # Handle array fields: __arr_ELEMTYPE_SIZE → ELEMTYPE name[SIZE]
+            if str_starts_with(ftype, str_new("__arr_")):
+                # Parse __arr_elemtype_size
+                inner: str = str_slice(ftype, 6, str_len(ftype))
+                # Find last underscore for size
+                last_us: i64 = -1
+                for k in range(str_len(inner)):
+                    if cast(u8, inner.data[k]) == 95:
+                        last_us = k
+                if last_us > 0:
+                    et: str = str_slice(inner, 0, last_us)
+                    sz: str = str_slice(inner, last_us + 1, str_len(inner))
+                    _emit_raw(s, str_format("    %s %s[%s];", et.data, fname.data, sz.data))
+                else:
+                    _emit_raw(s, str_format("    /* array field %s */", fname.data))
+            elif str_starts_with(ftype, str_new("__bf_")):
+                # Bitfield: __bf_TYPE_WIDTH → TYPE name : WIDTH
+                bf_inner: str = str_slice(ftype, 5, str_len(ftype))
+                bf_last: i64 = -1
+                for bk in range(str_len(bf_inner)):
+                    if cast(u8, bf_inner.data[bk]) == 95:
+                        bf_last = bk
+                if bf_last > 0:
+                    bf_t2: str = str_slice(bf_inner, 0, bf_last)
+                    bf_w2: str = str_slice(bf_inner, bf_last + 1, str_len(bf_inner))
+                    _emit_raw(s, str_format("    %s %s : %s;", bf_t2.data, fname.data, bf_w2.data))
+                else:
+                    _emit_raw(s, str_format("    /* bitfield %s */", fname.data))
+            elif str_eq(ftype, str_new("__funcptr__")) or str_eq(ftype, str_new("__vec__")) or str_eq(ftype, str_new("__typed_list__")):
+                _emit_raw(s, str_format("    /* TODO: %s %s */", ftype.data, fname.data))
+            else:
+                _emit_raw(s, str_format("    %s %s;", ftype.data, fname.data))
         _emit_raw(s, str_format("} %s;", cd.name.data))
-        # Constructor helper: _mp_make_StructName(fields...) → {.f1=f1, ...}
+        # Constructor helper — skip array/sentinel fields
         arg_list: str = str_new("")
         body_list: str = str_new("")
+        ctor_count: i32 = 0
         for j in range(fl.count):
-            fname: str = fl.entries[j].name
-            ftype: str = fl.entries[j].ctype
-            if j > 0:
+            fname2: str = fl.entries[j].name
+            ftype2: str = fl.entries[j].ctype
+            if str_starts_with(ftype2, str_new("__")):
+                continue
+            if ctor_count > 0:
                 arg_list = str_concat(arg_list, str_new(", "))
-            arg_list = str_concat(arg_list, str_format("%s %s", ftype.data, fname.data))
-            body_list = str_concat(body_list, str_format("    _s.%s = %s;\n", fname.data, fname.data))
-        if fl.count == 0:
+            arg_list = str_concat(arg_list, str_format("%s %s", ftype2.data, fname2.data))
+            body_list = str_concat(body_list, str_format("    _s.%s = %s;\n", fname2.data, fname2.data))
+            ctor_count = ctor_count + 1
+        if ctor_count == 0:
             arg_list = str_new("void")
         _emit_raw(s, str_format("static inline %s _mp_make_%s(%s) {", cd.name.data, cd.name.data, arg_list.data))
         _emit_raw(s, str_format("    %s _s = {0};", cd.name.data))
         _emit_raw(s, body_list)
         _emit_raw(s, str_new("    return _s;"))
         _emit_raw(s, str_new("}"))
+        _emit_raw(s, str_new(""))
+
+def _emit_enums(s: ptr[CompilerState], body: AstNodeList) -> void:
+    """Emit typedef enum for enum classes."""
+    for i in range(body.count):
+        node: ptr[AstNode] = body.items[i]
+        if node is None or node.tag != TAG_CLASS_DEF:
+            continue
+        cd: ptr[AstClassDef] = node.data
+        if strset_has(addr_of(s.extern_funcs), cd.name) == 0:
+            continue
+        _emit_raw(s, str_format("typedef enum {", cd.name.data))
+        for j in range(cd.body.count):
+            member: ptr[AstNode] = cd.body.items[j]
+            if member is not None and member.tag == TAG_ASSIGN:
+                ma: ptr[AstAssign] = member.data
+                if ma.targets.count > 0:
+                    tgt: ptr[AstNode] = ma.targets.items[0]
+                    if tgt.tag == TAG_NAME:
+                        mn: ptr[AstName] = tgt.data
+                        mval: str = native_compile_expr(s, ma.value)
+                        comma: str = str_new(",")
+                        if j == cd.body.count - 1:
+                            comma = str_new("")
+                        _emit_raw(s, str_format("    %s_%s = %s%s", cd.name.data, mn.id.data, mval.data, comma.data))
+        _emit_raw(s, str_format("} %s;", cd.name.data))
         _emit_raw(s, str_new(""))
 
 def _emit_constants(s: ptr[CompilerState], body: AstNodeList) -> void:
@@ -200,6 +398,9 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
         if node is None or node.tag != TAG_FUNCTION_DEF:
             continue
         fd: ptr[AstFunctionDef] = node.data
+        # Skip extern declarations (body is ...)
+        if _is_extern_func(fd):
+            continue
         ret: str = native_map_type(fd.returns)
         if str_eq(fd.name, str_new("main")):
             ret = str_new("int")
@@ -212,54 +413,148 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
             if j > 0:
                 arg_str = str_concat(arg_str, str_new(", "))
             arg_str = str_concat(arg_str, str_format("%s %s", atype.data, arg.name.data))
-        if args_node.args.count == 0:
+        if args_node.vararg is not None:
+            if args_node.args.count > 0:
+                arg_str = str_concat(arg_str, str_new(", ..."))
+            else:
+                arg_str = str_new("...")
+        elif args_node.args.count == 0:
             arg_str = str_new("void")
         _emit_raw(s, str_format("%s %s(%s);", ret.data, fd.name.data, arg_str.data))
     _emit_raw(s, str_new(""))
 
+def _is_extern_func(fd: ptr[AstFunctionDef]) -> int:
+    """Check if function body is just `...` (Ellipsis) — extern declaration."""
+    if fd.body.count == 1:
+        stmt: ptr[AstNode] = fd.body.items[0]
+        if stmt is not None and stmt.tag == TAG_EXPR_STMT:
+            es: ptr[AstExprStmt] = stmt.data
+            if es.value is not None and es.value.tag == TAG_CONSTANT:
+                cc: ptr[AstConstant] = es.value.data
+                if cc.kind == CONST_ELLIPSIS:
+                    return 1
+    return 0
+
+def _compile_one_func(s: ptr[CompilerState], fd: ptr[AstFunctionDef], prefix: str) -> void:
+    """Compile a single function definition with optional name prefix."""
+    # Skip extern declarations (body is just `...`)
+    if _is_extern_func(fd):
+        return
+    ret: str = native_map_type(fd.returns)
+    args_node: ptr[AstArguments] = fd.args.data
+    arg_str: str = str_new("")
+    # Clear local vars for this function
+    strmap_free(addr_of(s.local_vars))
+    s.local_vars = strmap_new(32)
+    strmap_free(addr_of(s.func_args))
+    s.func_args = strmap_new(16)
+    strmap_free(addr_of(s.array_vars))
+    s.array_vars = strmap_new(16)
+    strmap_free(addr_of(s.list_vars))
+    s.list_vars = strmap_new(16)
+
+    for j in range(args_node.args.count):
+        arg: ptr[AstArg] = args_node.args.items[j].data
+        # Self parameter in struct methods gets pointer-to-struct type
+        atype: str = native_map_type(arg.annotation)
+        if str_eq(arg.name, str_new("self")) and str_len(prefix) > 0:
+            struct_name: str = str_slice(prefix, 0, str_len(prefix) - 1)
+            atype = str_concat(struct_name, str_new("*"))
+        if j > 0:
+            arg_str = str_concat(arg_str, str_new(", "))
+        arg_str = str_concat(arg_str, str_format("%s %s", atype.data, arg.name.data))
+        strmap_set(addr_of(s.func_args), arg.name, atype)
+    # Variadic: *args → append ...
+    if args_node.vararg is not None:
+        if args_node.args.count > 0:
+            arg_str = str_concat(arg_str, str_new(", ..."))
+        else:
+            arg_str = str_new("...")
+    elif args_node.args.count == 0:
+        arg_str = str_new("void")
+
+    s.current_func_ret_type = ret
+    fname: str = fd.name
+    if str_len(prefix) > 0:
+        fname = str_concat(prefix, fd.name)
+
+    # Emit function signature
+    if str_eq(fname, str_new("main")):
+        _emit_raw(s, str_new("int main(void) {"))
+    else:
+        _emit_raw(s, str_format("%s %s(%s) {", ret.data, fname.data, arg_str.data))
+    s.indent = 1
+
+    # Compile body
+    for j in range(fd.body.count):
+        native_compile_stmt(s, fd.body.items[j])
+
+    s.indent = 0
+    _emit_raw(s, str_new("}"))
+    _emit_raw(s, str_new(""))
+
 def _emit_functions(s: ptr[CompilerState], body: AstNodeList) -> void:
-    """Compile and emit all function definitions."""
+    """Compile and emit all function definitions including struct methods."""
+    has_main: int = 0
+    test_names: ptr[str] = alloc(256 * 8)
+    test_count: i32 = 0
+
+    # Emit top-level functions
     for i in range(body.count):
         node: ptr[AstNode] = body.items[i]
-        if node is None or node.tag != TAG_FUNCTION_DEF:
-            continue
-        fd: ptr[AstFunctionDef] = node.data
-        ret: str = native_map_type(fd.returns)
-        # Build arg string and register in local scope
-        args_node: ptr[AstArguments] = fd.args.data
-        arg_str: str = str_new("")
-        # Clear local vars for this function
-        strmap_free(addr_of(s.local_vars))
-        s.local_vars = strmap_new(32)
-        strmap_free(addr_of(s.func_args))
-        s.func_args = strmap_new(16)
+        if node is not None and node.tag == TAG_FUNCTION_DEF:
+            fd: ptr[AstFunctionDef] = node.data
+            if str_eq(fd.name, str_new("main")):
+                has_main = 1
+            _compile_one_func(s, fd, str_new(""))
+            # Emit test wrapper for @test functions
+            if _has_decorator(fd, str_new("test")):
+                test_names[test_count] = fd.name
+                test_count = test_count + 1
+                _emit_raw(s, str_format("static void _mp_run_test_%s(void) {", fd.name.data))
+                _emit_raw(s, str_new("    _mp_test_total++;"))
+                _emit_raw(s, str_new("    _mp_test_failures = 0;"))
+                _emit_raw(s, str_format("    _mp_cprint(_MP_GREEN, \"[ RUN      ] %s\\n\");", fd.name.data))
+                _emit_raw(s, str_new("    uint64_t _t1 = _mp_time_ns();"))
+                _emit_raw(s, str_format("    %s();", fd.name.data))
+                _emit_raw(s, str_new("    uint64_t _t2 = _mp_time_ns();"))
+                _emit_raw(s, str_new("    char _tbuf[64]; _mp_fmt_time(_t2 - _t1, _tbuf, sizeof(_tbuf));"))
+                _emit_raw(s, str_new("    if (_mp_test_failures == 0) {"))
+                _emit_raw(s, str_format("        _mp_cprint(_MP_GREEN, \"[       OK ] %s %%s\\n\", _tbuf);", fd.name.data))
+                _emit_raw(s, str_new("    } else {"))
+                _emit_raw(s, str_new("        _mp_test_fail_total++;"))
+                _emit_raw(s, str_format("        _mp_cprint(_MP_RED, \"[  FAILED  ] %s (%%d failures)\\n\", _mp_test_failures);", fd.name.data))
+                _emit_raw(s, str_new("    }"))
+                _emit_raw(s, str_new("}"))
+                _emit_raw(s, str_new(""))
+        # Emit struct methods
+        elif node is not None and node.tag == TAG_CLASS_DEF:
+            cd: ptr[AstClassDef] = node.data
+            if strmap_has(addr_of(s.structs), cd.name):
+                method_prefix: str = str_concat(cd.name, str_new("_"))
+                for j in range(cd.body.count):
+                    method: ptr[AstNode] = cd.body.items[j]
+                    if method is not None and method.tag == TAG_FUNCTION_DEF:
+                        md: ptr[AstFunctionDef] = method.data
+                        # Inject self parameter type
+                        m_args: ptr[AstArguments] = md.args.data
+                        if m_args.args.count > 0:
+                            first_arg: ptr[AstArg] = m_args.args.items[0].data
+                            if str_eq(first_arg.name, str_new("self")):
+                                strmap_set(addr_of(s.func_args), str_new("self"), str_concat(cd.name, str_new("*")))
+                        _compile_one_func(s, md, method_prefix)
 
-        for j in range(args_node.args.count):
-            arg: ptr[AstArg] = args_node.args.items[j].data
-            atype: str = native_map_type(arg.annotation)
-            if j > 0:
-                arg_str = str_concat(arg_str, str_new(", "))
-            arg_str = str_concat(arg_str, str_format("%s %s", atype.data, arg.name.data))
-            strmap_set(addr_of(s.func_args), arg.name, atype)
-        if args_node.args.count == 0:
-            arg_str = str_new("void")
-
-        s.current_func_ret_type = ret
-
-        # Emit function signature
-        if str_eq(fd.name, str_new("main")):
-            _emit_raw(s, str_new("int main(void) {"))
-        else:
-            _emit_raw(s, str_format("%s %s(%s) {", ret.data, fd.name.data, arg_str.data))
-        s.indent = 1
-
-        # Compile body
-        for j in range(fd.body.count):
-            native_compile_stmt(s, fd.body.items[j])
-
-        s.indent = 0
+    # Emit test main if needed
+    if test_count > 0 and has_main == 0:
+        _emit_raw(s, str_new("int main(void) {"))
+        _emit_raw(s, str_new("    _mp_time_init();"))
+        for i in range(test_count):
+            _emit_raw(s, str_format("    _mp_run_test_%s();", test_names[i].data))
+        _emit_raw(s, str_new("    printf(\"[==========] %d tests, %d failures\\n\", _mp_test_total, _mp_test_fail_total);"))
+        _emit_raw(s, str_new("    return _mp_test_fail_total ? 1 : 0;"))
         _emit_raw(s, str_new("}"))
         _emit_raw(s, str_new(""))
+    free(test_names)
 
 def _emit_runtime_impl(s: ptr[CompilerState]) -> void:
     """Emit the runtime implementation include at the end."""
@@ -297,13 +592,18 @@ def native_compile(ast_buf: ptr[u8], ast_len: i64,
     # First pass: collect declarations
     _first_pass(addr_of(s), mod.body)
 
+    # Scan for typed lists
+    _scan_typed_lists(addr_of(s), mod.body)
+
     # Analysis passes
     native_infer_cold_from_body(addr_of(s), mod.body)
     native_build_alloc_tags(addr_of(s), mod.body)
 
     # Emit C code
-    _emit_includes(addr_of(s))
+    _emit_includes(addr_of(s), mod.body)
+    _emit_typed_lists(addr_of(s))
     _emit_forward_typedefs(addr_of(s), mod.body)
+    _emit_enums(addr_of(s), mod.body)
     _emit_struct_defs(addr_of(s), mod.body)
     _emit_constants(addr_of(s), mod.body)
     _emit_globals(addr_of(s), mod.body)

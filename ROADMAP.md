@@ -598,3 +598,195 @@ uses existing decorator and import mechanisms.
 | 3 | Missing hook `.py` file — verify clear compile error |
 | 4 | Hook that raises an exception — verify traceback shown in compile error |
 | 5 | Two functions in one file with different hooks — verify both wrapped correctly |
+
+
+# MicroPy Roadmap
+
+## Recent milestones
+
+- **Self-hosting bootstrap.** The compiler's analysis and codegen passes run
+  as a native `.dylib` called from Python via ctypes. Binary AST serialization
+  hands off the tree; native code returns generated C. Python retains only
+  `ast.parse` and the system C compiler invocation.
+- **Performance.** Native compile of a 1,000-line `.mpy` module: 0.91 ms
+  (vs 102.5 ms in Python). 112× speedup. The compiler is now invisible in
+  the pipeline — gcc dominates total build time.
+- **Codegen hooks.** Compile-time decorator hooks allow domain-specific
+  wrappers (e.g. Sierra Chart ACSIL studies) without polluting `.mpy` source.
+
+Bootstrap test parity with the Python compiler is the immediate priority —
+a handful of tests still diverge.
+
+---
+
+## Pythonic built-in types
+
+Strings, lists, and dicts currently use verbose function-call syntax. The goal
+is to make them feel like Python while compiling to the same efficient C. This
+is the compiler's next major focus.
+
+### Strings
+
+**Current:**
+```python
+s: str = str_new("hello")
+t: str = s + str_new(" world")
+u: str = str_format("x=%d", 42)
+parts: list = str_new("a,b,c").split(str_new(","))
+```
+
+**Target:**
+```python
+s: str = "hello"
+t: str = s + " world"
+u: str = f"x={42}"
+parts: list[str] = "a,b,c".split(",")
+```
+
+Work items:
+
+- **String literal inference.** A bare `"hello"` in a context expecting `str`
+  emits `mp_str_new("hello")` automatically. In a context expecting `cstr`,
+  it stays as a C string literal. The compiler already knows the expected type
+  from annotations — this is a codegen rewrite, not a type system change.
+- **Method call syntax on literals.** `"hello".upper()` needs the compiler to
+  recognize method calls on string-typed expressions and route them to the
+  `mp_str_*` functions. The method dispatch already works for `str` variables;
+  extending it to literals means treating a string literal as an implicit
+  `str_new` in method-call position.
+- **f-string support.** The Python AST already parses f-strings into
+  `JoinedStr` / `FormattedValue` nodes (the compiler handles `AstTag.JOINED_STR`).
+  Currently these emit `str_format` with positional args. The improvement is
+  to support format specs (`:d`, `:.2f`, etc.) and nested expressions cleanly.
+- **Automatic `str_free` via defer analysis.** When a string is created from a
+  literal and never escapes the function, the compiler can insert
+  `defer(str_free(s))` automatically. The escape analysis pass already exists
+  for other allocation types — extend it to cover `str`.
+
+### Lists
+
+**Current:**
+```python
+nums: list[int] = list_new()
+nums.append(10)
+v: int = nums[0]
+```
+
+**Target:**
+```python
+nums: list[int] = []
+nums.append(10)
+v: int = nums[0]
+
+# List literals with inference
+primes: list[int] = [2, 3, 5, 7, 11]
+
+# Pythonic iteration
+for x in nums:
+    print(x)
+```
+
+Work items:
+
+- **Empty list literal.** `[]` in a `list[T]` context emits `list_new()` with
+  the element type inferred from the annotation.
+- **Populated list literals.** `[2, 3, 5]` emits `list_new()` followed by
+  `list_append` for each element. Element type is inferred from the annotation
+  or from the literal types if unambiguous.
+- **List comprehension improvements.** Comprehensions already work but require
+  explicit `list[T]` annotation. Infer the element type from the expression
+  when the annotation is `list[T]` — currently works, but verify coverage for
+  nested expressions and filtered comprehensions.
+- **`in` operator.** `if x in nums:` emits a linear scan. For `list[T]` this
+  is `list_contains(nums, val_int(x))`; the compiler generates the wrapper.
+- **Slicing.** `nums[1:3]` returns a new `list[T]`. Lower to
+  `list_slice(nums, 1, 3)` with appropriate runtime support.
+- **`+` concatenation.** `a + b` on two `list[T]` values emits `list_concat`.
+- **`len()` already works** — no changes needed.
+
+### Dicts
+
+**Current:**
+```python
+d: dict = dict_new()
+dict_set(d, "key", val_int(42))
+v: int = as_int(dict_get(d, "key"))
+```
+
+**Target:**
+```python
+d: dict[str, int] = {}
+d["key"] = 42
+v: int = d["key"]
+
+# Dict literals
+scores: dict[str, int] = {"alice": 10, "bob": 20}
+
+# Pythonic access
+if "alice" in scores:
+    print(scores["alice"])
+
+for k, v in scores.items():
+    print(k, v)
+```
+
+Work items:
+
+- **Typed dict.** `dict[K, V]` as a first-class generic type. The runtime
+  `dict` is currently untyped (`val_int`/`as_int` boxing). A typed wrapper
+  eliminates boxing overhead and makes subscript access type-safe. Two options:
+  monomorphize at compile time (generate `dict_str_int` specializations), or
+  keep the current runtime but have the compiler insert box/unbox calls
+  automatically based on `K`/`V` types. The second approach is less work and
+  matches how `list[T]` works today.
+- **Subscript syntax.** `d["key"]` on a `dict[K, V]` emits `dict_get` + unbox
+  for reads, `dict_set` + box for writes. The subscript codegen already handles
+  `list[T]` — extend the same path to detect dict-typed expressions.
+- **Dict literals.** `{"a": 1, "b": 2}` emits `dict_new()` + `dict_set` per
+  entry, with types inferred from the annotation.
+- **`in` operator.** `if k in d:` emits `dict_has(d, k)`.
+- **Iteration.** `for k, v in d.items():` requires a dict iterator in the
+  runtime (`dict_iter_init`, `dict_iter_next`). `for k in d:` iterates keys
+  only.
+- **`.keys()`, `.values()`, `.get(k, default)`.** Method syntax routed to
+  runtime functions, same pattern as string methods.
+
+---
+
+## Ordering
+
+```
+ 1. String literal inference          (small, high impact, unblocks f-strings)
+ 2. f-string codegen improvements     (JoinedStr already parsed, needs polish)
+ 3. List literals and type inference   ([], [1,2,3])
+ 4. Dict subscript syntax             (d["k"] = v, v = d["k"])
+ 5. Typed dict[K, V]                  (auto box/unbox)
+ 6. Dict literals                     ({...} sugar)
+ 7. `in` operator for list and dict
+ 8. Dict iteration                    (for k, v in d.items())
+ 9. List slicing and concatenation
+10. Auto-defer for str/list/dict      (extend escape analysis)
+```
+
+Items 1–3 are the highest leverage — they cover the most common verbosity
+pain points and each is a self-contained compiler change. Items 4–6 build
+on each other. Item 10 is a cross-cutting improvement that benefits all
+three types.
+
+Each item is independently testable by comparing generated C output between
+the Python and native compiler paths, same strategy used for the bootstrap.
+
+---
+
+## Future directions
+
+- **Slice syntax on arrays.** `arr[2:8]` for `array[T, N]` and `ptr[T]` —
+  emit pointer arithmetic.
+- **Multiple return values.** `a, b = divmod(x, y)` — emit a struct return
+  with destructuring.
+- **`with` statement generalization.** Currently works for `open`. Extend to
+  any type with `__enter__`/`__exit__` or a `defer`-compatible cleanup.
+- **Pattern matching on structs.** `case Point(x=0):` — destructure struct
+  fields in match arms.
+- **Package manager / dependency resolution.** `import` across project
+  boundaries with versioned modules.

@@ -19,7 +19,7 @@ from ast_nodes import OP_LSHIFT, OP_RSHIFT, OP_BIT_OR, OP_BIT_XOR, OP_BIT_AND
 from ast_nodes import OP_UADD, OP_USUB, OP_NOT, OP_INVERT
 from ast_nodes import OP_AND, OP_OR
 from ast_nodes import OP_EQ, OP_NOT_EQ, OP_LT, OP_LT_E, OP_GT, OP_GT_E, OP_IS, OP_IS_NOT
-from strmap import StrMap, strmap_get, strmap_has
+from strmap import StrMap, StrSet, strmap_get, strmap_has, strset_has
 from native_compiler_state import CompilerState, FieldList, field_list_find
 from native_infer import native_infer_type, _strip_ptr, _ends_with_star
 
@@ -281,6 +281,16 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
     # ── 4.4: Subscript ──────────────────────────────────────────────
     if node.tag == TAG_SUBSCRIPT:
         p9: ptr[AstSubscript] = node.data
+        # Typed list subscript: TypedList_get(obj, idx)
+        if p9.value is not None and p9.value.tag == TAG_NAME:
+            sub_n: ptr[AstName] = p9.value.data
+            sub_et: str = strmap_get(addr_of(s.list_vars), sub_n.id)
+            if sub_et is not None:
+                sub_ln: str = strmap_get(addr_of(s.typed_lists), sub_et)
+                if sub_ln is not None:
+                    lst: str = native_compile_expr(s, p9.value)
+                    idx: str = native_compile_expr(s, p9.slice)
+                    return str_format("%s_get(%s, %s)", sub_ln.data, lst.data, idx.data)
         val: str = native_compile_expr(s, p9.value)
         sl: str = native_compile_expr(s, p9.slice)
         return str_format("%s[%s]", val.data, sl.data)
@@ -288,9 +298,14 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
     # ── 4.4: Attribute ──────────────────────────────────────────────
     if node.tag == TAG_ATTRIBUTE:
         p10: ptr[AstAttribute] = node.data
+        attr_name: str = p10.attr
+        # Enum member access: Color.RED → Color_RED
+        if p10.value is not None and p10.value.tag == TAG_NAME:
+            obj_name: ptr[AstName] = p10.value.data
+            if strset_has(addr_of(s.extern_funcs), obj_name.id):
+                return str_format("%s_%s", obj_name.id.data, attr_name.data)
         val2: str = native_compile_expr(s, p10.value)
         obj_type: str = native_infer_type(s, p10.value)
-        attr_name: str = p10.attr
         if _ends_with_star(obj_type):
             return str_format("%s->%s", val2.data, attr_name.data)
         return str_format("%s.%s", val2.data, attr_name.data)

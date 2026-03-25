@@ -123,6 +123,25 @@ static inline MpVal mp_list_pop(MpList* l) {
     return l->data[--l->len];
 }
 static inline void mp_list_free(MpList* l) { if (l) { free(l->data); free(l); } }
+static inline MpList* mp_list_slice(MpList* l, int64_t start, int64_t stop) {
+    MpList* r = mp_list_new();
+    if (start < 0) start = 0;
+    if (stop > l->len) stop = l->len;
+    for (int64_t i = start; i < stop; i++) mp_list_append(r, l->data[i]);
+    return r;
+}
+static inline MpList* mp_list_concat(MpList* a, MpList* b) {
+    MpList* r = mp_list_new();
+    for (int64_t i = 0; i < a->len; i++) mp_list_append(r, a->data[i]);
+    for (int64_t i = 0; i < b->len; i++) mp_list_append(r, b->data[i]);
+    return r;
+}
+static inline int mp_list_contains(MpList* l, MpVal v) {
+    for (int64_t i = 0; i < l->len; i++) {
+        if (l->data[i] == v) return 1;
+    }
+    return 0;
+}
 
 static inline MpDict* mp_dict_new(void) {
     MpDict* d = (MpDict*)malloc(sizeof(MpDict));

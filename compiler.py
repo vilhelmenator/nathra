@@ -203,6 +203,11 @@ class Compiler(StmtMixin, ExprMixin):
                         and isinstance(node.value.func, ast.Name)
                         and node.value.func.id in _ALLOC_FUNCS):
                     alloc_vars[node.target.id] = "local_only"
+                # List/dict literals are heap allocations too
+                elif node.value and isinstance(node.value, (ast.List, ast.Dict)):
+                    _ann_type = map_type(node.annotation) if node.annotation else ""
+                    if _ann_type in ("MpDict*", "__typed_list__") or _ann_type.endswith("List*"):
+                        alloc_vars[node.target.id] = "local_only"
             elif isinstance(node, ast.Assign):
                 for t in node.targets:
                     if isinstance(t, ast.Name):
@@ -230,6 +235,19 @@ class Compiler(StmtMixin, ExprMixin):
             # Passed to a call — classify by callee tag
             elif isinstance(node, ast.Call):
                 fname = node.func.id if isinstance(node.func, ast.Name) else None
+                # Method calls on the variable itself (e.g. nums.append(x))
+                # are mutations, not ownership transfers — skip
+                if (isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id in alloc_vars):
+                    continue
+                # Builtins that only read (borrow) — never take ownership
+                _SAFE_BORROWS = frozenset({
+                    "len", "print", "test_assert", "test_assert_eq",
+                    "sort", "assert", "str_len", "str_eq", "str_contains",
+                    "str_starts_with", "str_ends_with", "str_find",
+                    "list_len", "list_get", "dict_len", "dict_get", "dict_has",
+                })
                 for arg in node.args:
                     if not (isinstance(arg, ast.Name) and arg.id in alloc_vars):
                         continue
@@ -238,6 +256,8 @@ class Compiler(StmtMixin, ExprMixin):
                         continue  # already worst case
                     if fname in _FREE_FUNCS:
                         alloc_vars[arg.id] = "consumed"
+                    elif fname in _SAFE_BORROWS:
+                        pass  # safe borrow — no ownership change
                     else:
                         tags = self.func_alloc_tags.get(fname, frozenset())
                         if "consumer" in tags:
@@ -2219,9 +2239,6 @@ class Compiler(StmtMixin, ExprMixin):
                     base = node.annotation.value
                     if isinstance(base, ast.Name) and base.id in ("typed_list", "list"):
                         elem_t = get_typed_list_elem(node.annotation)
-                        # typed_list[T] always generates; list[T] only for struct types
-                        if base.id == "list" and elem_t not in self.structs:
-                            continue
                         if elem_t not in self.typed_lists:
                             prefix = nice.get(elem_t, elem_t.replace("*", "Ptr"))
                             self.typed_lists[elem_t] = f"{prefix}List"
@@ -2759,6 +2776,10 @@ class Compiler(StmtMixin, ExprMixin):
         """Build a C function prototype string (without trailing semicolon)."""
         from type_map import get_funcptr_info as _gfp
         ret_type = map_type(node.returns)
+        if ret_type == "__typed_list__":
+            _rt_elem = get_typed_list_elem(node.returns)
+            _rt_name = self.typed_lists.get(_rt_elem, "MpList")
+            ret_type = f"{_rt_name}*"
         args = []
         for arg in node.args.args:
             atype = map_type(arg.annotation)
@@ -2772,6 +2793,11 @@ class Compiler(StmtMixin, ExprMixin):
                     fp_arg_str = ", ".join(fp_args) if fp_args else "void"
                     args.append((arg.arg, f"{r} (*{arg.arg})({fp_arg_str})"))
                     continue
+            # Resolve typed_list[T] to TypedList*
+            if atype == "__typed_list__":
+                elem_t = get_typed_list_elem(arg.annotation)
+                list_name = self.typed_lists.get(elem_t, "MpList")
+                atype = f"{list_name}*"
             _MUTABLE_RT = ("MpReader*", "MpWriter*", "MpArena*", "CompilerState*")
             const_prefix = ""
             if (atype.endswith("*")
