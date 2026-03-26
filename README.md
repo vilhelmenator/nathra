@@ -1,8 +1,8 @@
-# micropy
+# nathra
 
-A Python-syntax compiler that targets C. Write systems code in a clean, typed Python dialect — get fast, portable C out the other side.
+A typed systems language in valid Python syntax that compiles to portable C. Easy for humans and LLMs to write, it preserves enough structure for source-level rewrites that conventional C compilers cannot apply to unchanged C code.
 
-The compiler includes a bootstrapped native backend — written in micropy itself — that compiles orders of magnitude faster than the Python implementation. See [Bootstrap performance](#bootstrap-performance) for benchmarks.
+The compiler includes a bootstrapped native backend — written in nathra itself — that compiles orders of magnitude faster than the Python implementation. See [Bootstrap performance](#bootstrap-performance) for benchmarks.
 
 ```python
 struct Vec2:
@@ -43,7 +43,7 @@ python3 cli/snekc.py                                          # interactive REPL
 
 ### Types
 
-| micropy       | C                  | Notes                              |
+| nathra        | C                  | Notes                              |
 |---------------|--------------------|------------------------------------|
 | `int`         | `int64_t`          |                                    |
 | `float`       | `double`           |                                    |
@@ -466,7 +466,7 @@ if path is not None:
 
 ### Memory management
 
-micropy has no garbage collector. Heap-allocated types — `str`, `list[T]`, `dict` — are owned by you and must be freed explicitly, or use **auto-defer** (see below).
+nathra has no garbage collector. Heap-allocated types — `str`, `list[T]`, `dict` — are owned by you and must be freed explicitly, or use **auto-defer** (see below).
 
 **`defer`** — runs a cleanup call at the end of the enclosing function, in reverse order, even on early return:
 
@@ -847,7 +847,7 @@ typedef struct {
 MpApi* get_api(void);
 ```
 
-Host (can also be micropy):
+Host (can also be nathra):
 
 ```python
 # host.mpy
@@ -875,7 +875,7 @@ def main() -> void:
 
 ### Interactive shell
 
-`snekc` is a live REPL that compiles each line through micropy → C → native code:
+`snekc` is a live REPL that compiles each line through nathra → C → native code:
 
 ```sh
 python3 cli/snekc.py
@@ -899,7 +899,7 @@ Variables become C globals that persist between evaluations. State is transferre
 
 ### Build system
 
-`build.mpy` is a build script interpreted by micropy's build runner:
+`build.mpy` is a build script interpreted by nathra's build runner:
 
 ```python
 exe("hello",   sources=["hello.mpy"],         run=False)
@@ -956,7 +956,7 @@ If any pointer is assigned from another (`a = b`), neither receives `restrict`.
 
 ### Branch-free select
 
-An `if/else` that assigns the same variable in both arms using only pure expressions (literals, locals, arithmetic — no calls, no pointer derefs with side effects) is emitted as a C ternary `?:`. The C compiler sometimes converts `if/else` to a `cmov` instruction but only when it can prove both arms are side-effect-free; micropy knows this from the AST.
+An `if/else` that assigns the same variable in both arms using only pure expressions (literals, locals, arithmetic — no calls, no pointer derefs with side effects) is emitted as a C ternary `?:`. The C compiler sometimes converts `if/else` to a `cmov` instruction but only when it can prove both arms are side-effect-free; nathra knows this from the AST.
 
 ```python
 result: int = 0
@@ -980,7 +980,7 @@ for i in range(4):
 
 ### Stack variable lifetime narrowing
 
-Large local variables are wrapped in a `{ }` block scope sized to their actual first/last use, so the C compiler knows the stack slot can be reused for a non-overlapping local. micropy can guarantee this safely because it tracks whether `&var` is ever taken; C compilers must conservatively assume it might be.
+Large local variables are wrapped in a `{ }` block scope sized to their actual first/last use, so the C compiler knows the stack slot can be reused for a non-overlapping local. nathra can guarantee this safely because it tracks whether `&var` is ever taken; C compilers must conservatively assume it might be.
 
 ### Hot/cold splitting
 
@@ -1060,12 +1060,12 @@ if p is not None:
 
 ## Benchmark
 
-### Python vs micropy
+### Python vs nathra
 
-`bench/bench.mpy` is a dual-mode file that runs as plain Python and compiles with micropy. `bench/run.py` builds the binary with `-O2`, runs both, and prints a comparison:
+`bench/bench.mpy` is a dual-mode file that runs as plain Python and compiles with nathra. `bench/run.py` builds the binary with `-O2`, runs both, and prints a comparison:
 
 ```
-benchmark             python ms   micropy ms   speedup
+benchmark             python ms    nathra ms   speedup
 --------------------  ----------  ----------  --------
 float_sum                   1373           8      171x
 leibniz_pi                  2451          14      175x
@@ -1080,10 +1080,10 @@ python3 run.py
 
 ### Compiler optimizations vs naive C
 
-`bench/run_opts.py` builds three versions of the same algorithms — Python, hand-written idiomatic C, and micropy — and prints a side-by-side comparison. It demonstrates seven automatic micropy optimizations:
+`bench/run_opts.py` builds three versions of the same algorithms — Python, hand-written idiomatic C, and nathra — and prints a side-by-side comparison. It demonstrates seven automatic nathra optimizations:
 
 ```
-benchmark              python ms  naive C ms  micropy ms   speedup  optimization
+benchmark              python ms  naive C ms   nathra ms   speedup  optimization
 --------------------  ----------  ----------  ----------  --------  ----------------------------------------
 saxpy                      23200         134         134      1.0x  restrict → no aliasing-check prelude
 strided_sum                 5080          94          94      1.0x  constant specialisation (stride=4 folded in)
@@ -1096,9 +1096,9 @@ linked_list                    —         943         962      1.0x  prefetch(n
 
 - **small_alloc** — `alloca` substitution is a real win everywhere: stack allocation costs ~1 ns (one `sub rsp` instruction) vs 30–100 ns for `malloc/free` on typical allocators. 5.2× with 5 M calls to a 512-byte scratch-buffer function.
 - **soa_sum** — the `@soa` benchmark extracts one field from a particle array (8 fields, 64 B/particle). AoS loads a full 64-byte cache line to get 8 B of `.x`; SoA reads only the `particles_x[]` stream (8 B/element). 4.1× speedup at 5 M particles, `@noinline` on both sides to prevent the optimizer from collapsing the rep loop.
-- **saxpy / strided_sum / restrict_short** — Apple Clang at `-O2 -march=native` on Apple Silicon already applies vectorization strategies that match micropy's `restrict` and constant-specialisation output on this target; speedup is architecture-dependent and more visible on x86 toolchains where the overlap-check preamble is costlier.
-- **hot_cold** — micropy outlines all three `raise` branches into `static __attribute__((cold, noreturn))` helpers, keeping the hot loop in fewer I-cache lines. The benefit is measurable under I-cache pressure from a larger surrounding binary; Apple Silicon's large L1-I cache absorbs the inline cold paths on this isolated benchmark.
-- **linked_list** — micropy inserts `MP_PREFETCH(head->next->next, 0, 1)` before each pointer-chase load. The list is built with a stride-permuted layout (~12 MB hops) to defeat hardware prefetchers. Apple Silicon's stream-detection hardware is unusually aggressive and partially covers irregular pointer-chase patterns; the prefetch benefit is larger on Intel/AMD where L3-miss latency is higher relative to core speed.
+- **saxpy / strided_sum / restrict_short** — Apple Clang at `-O2 -march=native` on Apple Silicon already applies vectorization strategies that match nathra's `restrict` and constant-specialisation output on this target; speedup is architecture-dependent and more visible on x86 toolchains where the overlap-check preamble is costlier.
+- **hot_cold** — nathra outlines all three `raise` branches into `static __attribute__((cold, noreturn))` helpers, keeping the hot loop in fewer I-cache lines. The benefit is measurable under I-cache pressure from a larger surrounding binary; Apple Silicon's large L1-I cache absorbs the inline cold paths on this isolated benchmark.
+- **linked_list** — nathra inserts `MP_PREFETCH(head->next->next, 0, 1)` before each pointer-chase load. The list is built with a stride-permuted layout (~12 MB hops) to defeat hardware prefetchers. Apple Silicon's stream-detection hardware is unusually aggressive and partially covers irregular pointer-chase patterns; the prefetch benefit is larger on Intel/AMD where L3-miss latency is higher relative to core speed.
 
 ```sh
 cd bench
@@ -1107,7 +1107,7 @@ python3 run_opts.py
 
 ## Bootstrap performance
 
-The native compiler is written in micropy and compiles itself. Self-compilation benchmark — the native compiler compiling its own 8 source modules (~3,900 lines) to C:
+The native compiler is written in nathra and compiles itself. Self-compilation benchmark — the native compiler compiling its own 8 source modules (~3,900 lines) to C:
 
 | Module | Python | Native | Speedup |
 |--------|--------|--------|---------|
@@ -1133,12 +1133,12 @@ Generated `.h` files include only `micropy_types.h` — a minimal header contain
 
 The full runtime is included exactly once, in the generated `.c` file. Each `.c` includes its own `.h`, which transitively brings in any project module dependencies.
 
-This means including a micropy module header in C++ or C code never silently pulls in platform headers. Compile times stay flat as the project grows.
+This means including a nathra module header in C++ or C code never silently pulls in platform headers. Compile times stay flat as the project grows.
 
 ## Project structure
 
 ```
-micropy/
+nathra/
   Makefile                          Build the native compiler dylib
   compiler/                         Python compiler (stage 0)
     compiler.py                       Front-end: parse, first-pass, emit glue
@@ -1149,7 +1149,7 @@ micropy/
   cli/                              User-facing tools
     mpy.py                            CLI entry point
     snekc.py                          Interactive REPL shell
-    micropy.py                        IDE stubs (from micropy import *)
+    micropy.py                        IDE stubs (from nathra import *)
   runtime/                          C headers shipped with the project
     micropy_rt.h                      Full runtime: strings, lists, dicts, I/O, concurrency
     micropy_types.h                   Forward declarations — safe to include from any header
