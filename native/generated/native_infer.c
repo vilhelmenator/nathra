@@ -1,4 +1,4 @@
-/* mpy_stamp: 1774466725.396013 */
+/* mpy_stamp: 1774530501.865886 */
 #include "micropy_rt.h"
 #include "native_infer.h"
 
@@ -9,24 +9,16 @@ int64_t native_infer__ends_with_star(const MpStr* t);
 MpStr* native_infer__binop_method_name(uint8_t op);
 int main(void);
 
-MpStr* native_infer__binop_method_name(uint8_t op) {
-    "Map operator tag to __method__ name for operator overloading.";
-    if ((op == OP_ADD)) {
-        return mp_str_new("__add__");
+int64_t native_infer__ends_with_star(const MpStr* t) {
+    "Check if type string ends with '*'.";
+    if ((t == NULL)) {
+        return 0;
     }
-    if ((op == OP_SUB)) {
-        return mp_str_new("__sub__");
+    int64_t len = mp_str_len(t);
+    if (((len > 0) && (((uint8_t)(t->data[(len - 1)])) == 42))) {
+        return 1;
     }
-    if ((op == OP_MULT)) {
-        return mp_str_new("__mul__");
-    }
-    if ((op == OP_DIV)) {
-        return mp_str_new("__truediv__");
-    }
-    if ((op == OP_MOD)) {
-        return mp_str_new("__mod__");
-    }
-    return NULL;
+    return 0;
 }
 
 MpStr* native_infer__strip_ptr(const MpStr* t) {
@@ -45,18 +37,6 @@ MpStr* native_infer__strip_ptr(const MpStr* t) {
         }
     }
     return t;
-}
-
-int64_t native_infer__ends_with_star(const MpStr* t) {
-    "Check if type string ends with '*'.";
-    if ((t == NULL)) {
-        return 0;
-    }
-    int64_t len = mp_str_len(t);
-    if (((len > 0) && (((uint8_t)(t->data[(len - 1)])) == 42))) {
-        return 1;
-    }
-    return 0;
 }
 
 MpStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstNode* restrict node) {
@@ -132,6 +112,26 @@ MpStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstN
         }
     }
     return mp_str_new("int64_t");
+}
+
+MpStr* native_infer__binop_method_name(uint8_t op) {
+    "Map operator tag to __method__ name for operator overloading.";
+    if ((op == OP_ADD)) {
+        return mp_str_new("__add__");
+    }
+    if ((op == OP_SUB)) {
+        return mp_str_new("__sub__");
+    }
+    if ((op == OP_MULT)) {
+        return mp_str_new("__mul__");
+    }
+    if ((op == OP_DIV)) {
+        return mp_str_new("__truediv__");
+    }
+    if ((op == OP_MOD)) {
+        return mp_str_new("__mod__");
+    }
+    return NULL;
 }
 
 MpStr* native_infer_native_infer_type(CompilerState* restrict s, AstNode* restrict node) {

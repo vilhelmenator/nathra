@@ -52,6 +52,11 @@ class CompilerState:
     current_module: str
     current_func_ret_type: str
 
+    # Flags
+    safe_mode: i32
+    reorder_funcs: i32
+    dce_roots: ptr[StrSet]      # when non-NULL, only emit functions reachable from these roots
+
     # Counters
     fstr_counter: i32
     lambda_counter: i32
@@ -99,6 +104,7 @@ def compiler_state_new() -> CompilerState:
         strset_new(16), strset_new(16), strset_new(16), strset_new(16),
         strmap_new(32), strmap_new(16),
         None, None,
+        0, 0, None,
         0, 0, 0, 0, 0
     )
     s.lines = writer_new(4096)

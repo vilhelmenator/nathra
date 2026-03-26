@@ -130,6 +130,11 @@ class Compiler(StmtMixin, ExprMixin):
     _in_stream_func: bool = False     # current function has @stream — subscript writes → non-temporal stores
     _stream_loop_active: bool = False # inside a @stream for-range loop body right now
     debug_mode: bool = False                             # emit allocation tracking (--debug)
+    safe_mode: bool = False                              # emit safety checks (--safe)
+    _null_states: dict = field(default_factory=dict)     # varname → "non-null"|"null"|"unknown" for ptr vars
+    reorder_funcs: bool = False                          # reorder functions by call-graph weight
+    call_graph_report: bool = False                      # print call graph report
+    _dce_roots: set = field(default_factory=set)         # imported names — root set for dead code elimination
     serializable_structs: set = field(default_factory=set)   # struct names with @serializable
     backref_fields: set = field(default_factory=set)         # (struct_name, field_name) pairs
     codegen_hooks: dict = field(default_factory=dict)        # func_name → (module_path, hook_name, args, kwargs)
@@ -271,6 +276,271 @@ class Compiler(StmtMixin, ExprMixin):
                             alloc_vars[arg.id] = "escaping"
 
         return alloc_vars
+
+    # ── Sources that produce non-null pointers ──────────────────────────
+    _NONNULL_FUNCS = frozenset({
+        "alloc", "alloc_safe", "mp_alloc", "addr_of", "ref",
+        "arena_new", "list_new", "dict_new", "writer_new",
+        "mp_str_new", "str_new", "mp_list_new", "mp_dict_new",
+        "channel_new", "mutex_new", "cond_new", "pool_new",
+    })
+
+    def _null_analyze(self, func_node: ast.FunctionDef) -> dict:
+        """Analyze nullability of ptr[T] variables in a function.
+
+        Returns {varname: state} where state is:
+          "non-null" — provably non-null (alloc, addr_of, constructor, guarded)
+          "null"     — provably null (assigned None, never reassigned)
+          "unknown"  — can't prove either way (parameters, conditional assignment)
+        """
+        states = {}
+
+        # Parameters: ptr[T] → unknown, everything else ignored
+        for arg in func_node.args.args:
+            if arg.annotation:
+                ctype = map_type(arg.annotation)
+                if ctype.endswith("*"):
+                    states[arg.arg] = "unknown"
+
+        # Walk all assignments to classify initial state
+        for node in ast.walk(func_node):
+            vname = None
+            value = None
+
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                ctype = map_type(node.annotation) if node.annotation else ""
+                if not ctype.endswith("*"):
+                    continue
+                vname = node.target.id
+                value = node.value
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+                if isinstance(node.targets[0], ast.Name):
+                    vname = node.targets[0].id
+                    value = node.value
+                    # Only track if we already know it's a pointer var
+                    if vname not in states:
+                        # Check if the value looks like a pointer operation
+                        if value is None:
+                            continue
+                        if (isinstance(value, ast.Constant) and value.value is None):
+                            states[vname] = "null"
+                            continue
+                        # Can't determine type from bare assign without annotation
+                        continue
+
+            if vname is None:
+                continue
+
+            if value is None:
+                # Declaration without initializer — unknown
+                if vname not in states:
+                    states[vname] = "unknown"
+                continue
+
+            # None literal → null
+            if isinstance(value, ast.Constant) and value.value is None:
+                cur = states.get(vname)
+                if cur == "non-null":
+                    # Reassigned: was non-null, now null → could be either → unknown
+                    states[vname] = "unknown"
+                else:
+                    states[vname] = "null"
+                continue
+
+            # Name "None" → null
+            if isinstance(value, ast.Name) and value.id == "None":
+                cur = states.get(vname)
+                if cur == "non-null":
+                    states[vname] = "unknown"
+                else:
+                    states[vname] = "null"
+                continue
+
+            # Known non-null sources
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                fname = value.func.id
+                if fname in self._NONNULL_FUNCS:
+                    cur = states.get(vname)
+                    if cur == "null":
+                        states[vname] = "unknown"
+                    else:
+                        states[vname] = "non-null"
+                    continue
+                # Struct constructor → non-null (returns by value, but ptr[Struct] = Struct() is addr_of)
+                if fname in self.structs:
+                    cur = states.get(vname)
+                    if cur == "null":
+                        states[vname] = "unknown"
+                    else:
+                        states[vname] = "non-null"
+                    continue
+
+            # Any other assignment to a tracked pointer → unknown
+            if vname in states:
+                cur = states[vname]
+                if cur in ("null", "non-null"):
+                    states[vname] = "unknown"
+
+        return states
+
+    def _null_join(self, a: str, b: str) -> str:
+        """Join two nullability states at a merge point."""
+        if a == b:
+            return a
+        return "unknown"
+
+    # ── Weighted call graph for function layout ─────────────────────────
+
+    def _build_weighted_call_graph(self, funcs: list) -> dict:
+        """Build weighted undirected edge map: (fname_a, fname_b) → weight.
+
+        Weight multipliers:
+          - Inside for/while loop: 10× per nesting level
+          - Inside @hot function: 5×
+          - Inside cold/error path: 0.1×
+          - Recursive self-call: 0× (skipped)
+        """
+        mod_names = {f.name for f in funcs}
+        edges = {}  # (a, b) with a < b → total weight
+        hot_funcs = set()
+        cold_funcs = getattr(self, '_cold_funcs', set())
+
+        for func in funcs:
+            decs = self.get_decorators(func)
+            is_hot = "hot" in decs
+            if is_hot:
+                hot_funcs.add(func.name)
+
+            # Walk the body tracking loop nesting depth
+            def _walk_weighted(stmts, depth=0, in_cold=False):
+                for stmt in stmts:
+                    # Track cold context
+                    stmt_cold = in_cold
+                    if isinstance(stmt, ast.Raise):
+                        stmt_cold = True
+
+                    # Recurse into nested blocks
+                    if isinstance(stmt, (ast.For, ast.While)):
+                        _walk_weighted(stmt.body, depth + 1, stmt_cold)
+                        if hasattr(stmt, 'orelse') and stmt.orelse:
+                            _walk_weighted(stmt.orelse, depth, stmt_cold)
+                        continue
+                    if isinstance(stmt, ast.If):
+                        # Check if body is cold (only raises/cold calls)
+                        body_cold = (len(stmt.body) == 1
+                                     and isinstance(stmt.body[0], ast.Raise))
+                        _walk_weighted(stmt.body, depth, body_cold or stmt_cold)
+                        if stmt.orelse:
+                            _walk_weighted(stmt.orelse, depth, stmt_cold)
+                        continue
+                    if isinstance(stmt, ast.With):
+                        _walk_weighted(stmt.body, depth, stmt_cold)
+                        continue
+
+                    # Find calls in this statement
+                    for nd in ast.walk(stmt):
+                        if (isinstance(nd, ast.Call)
+                                and isinstance(nd.func, ast.Name)
+                                and nd.func.id in mod_names
+                                and nd.func.id != func.name):
+                            callee = nd.func.id
+                            # Compute weight
+                            w = 10 ** depth  # loop nesting
+                            if is_hot:
+                                w *= 5
+                            if stmt_cold or callee in cold_funcs:
+                                w *= 0.1
+                            # Add to edge (undirected: key is sorted pair)
+                            key = (min(func.name, callee), max(func.name, callee))
+                            edges[key] = edges.get(key, 0) + w
+
+            _walk_weighted(func.body)
+
+        return edges
+
+    def _layout_by_call_graph(self, funcs: list, edges: dict) -> list:
+        """Greedy layout: place functions to minimize weighted distance.
+
+        1. Seed with the heaviest edge — place those two adjacent.
+        2. For each remaining function (by total weight, descending),
+           insert adjacent to its highest-weight already-placed neighbor.
+        3. Ties broken by source order.
+        """
+        if not edges:
+            return funcs  # no edges → keep original order
+
+        # Build adjacency: fname → [(neighbor, weight)]
+        adj = {}
+        for (a, b), w in edges.items():
+            adj.setdefault(a, []).append((b, w))
+            adj.setdefault(b, []).append((a, w))
+
+        # Total weight per function (for priority)
+        total_w = {}
+        for (a, b), w in edges.items():
+            total_w[a] = total_w.get(a, 0) + w
+            total_w[b] = total_w.get(b, 0) + w
+
+        fn_map = {f.name: f for f in funcs}
+        placed = []
+        placed_set = set()
+
+        # Seed: heaviest edge
+        best_edge = max(edges, key=lambda k: edges[k])
+        a, b = best_edge
+        placed = [a, b]
+        placed_set = {a, b}
+
+        # Remaining functions sorted by total weight (desc), then source order
+        src_order = {f.name: i for i, f in enumerate(funcs)}
+        remaining = [f.name for f in funcs if f.name not in placed_set]
+        remaining.sort(key=lambda n: (-total_w.get(n, 0), src_order.get(n, 0)))
+
+        for fname in remaining:
+            # Find best placed neighbor
+            best_neighbor = None
+            best_w = -1
+            for neighbor, w in adj.get(fname, []):
+                if neighbor in placed_set and w > best_w:
+                    best_w = w
+                    best_neighbor = neighbor
+
+            if best_neighbor is not None:
+                # Insert adjacent to best neighbor
+                idx = placed.index(best_neighbor)
+                # Try both sides, pick the one that's closer to other neighbors
+                placed.insert(idx + 1, fname)
+            else:
+                # No edges to placed functions — append at end
+                placed.append(fname)
+            placed_set.add(fname)
+
+        # Convert back to AST nodes, preserving any functions not in the graph
+        result = []
+        for name in placed:
+            if name in fn_map:
+                result.append(fn_map[name])
+        # Add any functions that weren't in the graph at all
+        for f in funcs:
+            if f.name not in placed_set:
+                result.append(f)
+
+        return result
+
+    def _print_call_graph_report(self, funcs: list, edges: dict, module_name: str):
+        """Print a call graph report to stderr."""
+        import sys
+        print(f"\ncall graph: {module_name}", file=sys.stderr)
+        # Sort edges by weight descending
+        sorted_edges = sorted(edges.items(), key=lambda x: -x[1])
+        for (a, b), w in sorted_edges[:20]:  # top 20
+            print(f"  {a} \u2194 {b:30s} weight: {w:.0f}", file=sys.stderr)
+        # Print suggested order
+        layout = self._layout_by_call_graph(funcs, edges)
+        print(f"suggested order:", file=sys.stderr)
+        for i, f in enumerate(layout, 1):
+            print(f"  {i:3d}. {f.name}", file=sys.stderr)
+        print(file=sys.stderr)
 
     def _build_alloc_tags(self, tree) -> None:
         """Populate self.func_alloc_tags[fname] = frozenset of allocation roles.
@@ -1334,6 +1604,8 @@ class Compiler(StmtMixin, ExprMixin):
 
         # ---- Emit C file ----
         # micropy_rt.h brings in stdint, stdio, stdlib, string, math — no need to repeat them.
+        if self.safe_mode:
+            self.emit("#define MP_SAFE")
         self.emit('#include "micropy_rt.h"')
         if self._variadic_funcs:
             self.emit('#include <stdarg.h>')
@@ -1489,6 +1761,38 @@ class Compiler(StmtMixin, ExprMixin):
                 if "compile_time" in decs:
                     self._emit_compile_time(node, tree)
 
+        # Pre-compute DCE reachability if we have roots (dependency module)
+        _dce_set = None
+        if self._dce_roots and module_name != "__main__":
+            _all_fn = [n for n in ast.iter_child_nodes(tree)
+                       if isinstance(n, ast.FunctionDef)
+                       and not any(d in self.get_decorators(n)
+                                   for d in ("extern", "compile_time", "trait"))]
+            _all_names = {f.name for f in _all_fn}
+            _dce_calls = {}
+            for _fn in _all_fn:
+                _callees = set()
+                for _nd in ast.walk(_fn):
+                    if (isinstance(_nd, ast.Call)
+                            and isinstance(_nd.func, ast.Name)
+                            and _nd.func.id in _all_names
+                            and _nd.func.id != _fn.name):
+                        _callees.add(_nd.func.id)
+                _dce_calls[_fn.name] = _callees
+            _dce_set = set()
+            _dce_work = list(self._dce_roots & _all_names)
+            if "main" in _all_names:
+                _dce_work.append("main")
+            while _dce_work:
+                _name = _dce_work.pop()
+                if _name in _dce_set:
+                    continue
+                _dce_set.add(_name)
+                for _callee in _dce_calls.get(_name, ()):
+                    if _callee not in _dce_set:
+                        _dce_work.append(_callee)
+            self._dce_reachable = _dce_set
+
         # Emit function prototypes (forward declarations) — structs already emitted above;
         # prototypes here allow struct methods to call free functions defined later
         # methods can call free functions defined later in the file
@@ -1502,6 +1806,8 @@ class Compiler(StmtMixin, ExprMixin):
                     plat = plat_info["args"][0] if plat_info.get("args") else "all"
                     if self.platform != "all" and plat != self.platform:
                         continue
+                if _dce_set is not None and node.name not in _dce_set:
+                    continue
                 proto = self._make_prototype(node, module_name)
                 if proto:
                     self.emit(f"{proto};")
@@ -1517,7 +1823,7 @@ class Compiler(StmtMixin, ExprMixin):
             for tname in trait_names:
                 self._verify_trait(sname, tname, tree)
 
-        # Emit functions — in topological order (callees before callers).
+        # Emit functions — ordered by call-graph weight or topological order.
         # Prototypes already emitted above handle mutual recursion.
         _emit_funcs = []
         for node in ast.iter_child_nodes(tree):
@@ -1527,35 +1833,60 @@ class Compiler(StmtMixin, ExprMixin):
                     continue
                 _emit_funcs.append(node)
 
-        # Build call graph: fname → set of module-function names it calls
-        _mod_names = {n.name for n in _emit_funcs}
-        _call_graph = {}
-        for _fn in _emit_funcs:
-            _edges = set()
-            for _stmt in _fn.body:
-                for _nd in ast.walk(_stmt):
-                    if (isinstance(_nd, ast.Call)
-                            and isinstance(_nd.func, ast.Name)
-                            and _nd.func.id in _mod_names
-                            and _nd.func.id != _fn.name):
-                        _edges.add(_nd.func.id)
-            _call_graph[_fn.name] = _edges
+        # Dead code elimination: filter to pre-computed reachable set
+        if _dce_set is not None:
+            _before = len(_emit_funcs)
+            _emit_funcs = [f for f in _emit_funcs if f.name in _dce_set]
+            _eliminated = _before - len(_emit_funcs)
+            if _eliminated > 0:
+                import sys
+                print(f"{module_name}: eliminated {_eliminated} unused function(s)",
+                      file=sys.stderr)
 
-        # Topological sort via DFS post-order: callee before caller
-        _topo_visited: set = set()
-        _topo_result: list = []
-        def _topo_dfs(name: str) -> None:
-            if name in _topo_visited:
-                return
-            _topo_visited.add(name)
-            for dep in _call_graph.get(name, ()):
-                _topo_dfs(dep)
-            _topo_result.append(name)
-        for _fn in _emit_funcs:
-            _topo_dfs(_fn.name)
+        if self.reorder_funcs or self.call_graph_report:
+            # Weighted call-graph layout: minimize weighted distance between
+            # frequently co-called functions for I-cache locality.
+            _weighted_edges = self._build_weighted_call_graph(_emit_funcs)
+            if self.call_graph_report:
+                self._print_call_graph_report(_emit_funcs, _weighted_edges, module_name)
+            if self.reorder_funcs:
+                _emit_funcs = self._layout_by_call_graph(_emit_funcs, _weighted_edges)
+                _ordered_names = [f.name for f in _emit_funcs]
+            else:
+                # Report only — still use topo sort for emission
+                _ordered_names = None
+        else:
+            _ordered_names = None
+
+        if _ordered_names is None:
+            # Default: topological sort via DFS post-order (callee before caller)
+            _mod_names = {n.name for n in _emit_funcs}
+            _call_graph = {}
+            for _fn in _emit_funcs:
+                _edges = set()
+                for _stmt in _fn.body:
+                    for _nd in ast.walk(_stmt):
+                        if (isinstance(_nd, ast.Call)
+                                and isinstance(_nd.func, ast.Name)
+                                and _nd.func.id in _mod_names
+                                and _nd.func.id != _fn.name):
+                            _edges.add(_nd.func.id)
+                _call_graph[_fn.name] = _edges
+            _topo_visited: set = set()
+            _topo_result: list = []
+            def _topo_dfs(name: str) -> None:
+                if name in _topo_visited:
+                    return
+                _topo_visited.add(name)
+                for dep in _call_graph.get(name, ()):
+                    _topo_dfs(dep)
+                _topo_result.append(name)
+            for _fn in _emit_funcs:
+                _topo_dfs(_fn.name)
+            _ordered_names = _topo_result
 
         _fn_map = {n.name: n for n in _emit_funcs}
-        for _fname in _topo_result:
+        for _fname in _ordered_names:
             node = _fn_map[_fname]
             decs = self.get_decorators(node)
 
@@ -1691,8 +2022,12 @@ class Compiler(StmtMixin, ExprMixin):
         # Emit function prototypes using _make_prototype for const/restrict consistency
         _fn_nodes = {n.name: n for n in ast.iter_child_nodes(tree)
                      if isinstance(n, ast.FunctionDef)}
+        _dce_set = getattr(self, '_dce_reachable', None)
         for fname in mod_info.functions:
             if fname in self._extern_funcs:
+                continue
+            # Skip eliminated functions from header
+            if _dce_set is not None and fname not in _dce_set:
                 continue
             fn_node = _fn_nodes.get(fname)
             if fn_node:
@@ -2617,13 +2952,15 @@ class Compiler(StmtMixin, ExprMixin):
                     local_name = alias.asname if alias.asname else alias.name
                     self.from_imports[local_name] = (mod_name, alias.name)
                 return
-            self.compile_dependency(mod_name)
+            # Collect imported names for dead code elimination
+            _used = {alias.name for alias in node.names}
+            self.compile_dependency(mod_name, used_names=_used)
         self.imports.append(mod_name)
         for alias in node.names:
             local_name = alias.asname if alias.asname else alias.name
             self.from_imports[local_name] = (mod_name, alias.name)
 
-    def compile_dependency(self, mod_name: str):
+    def compile_dependency(self, mod_name: str, used_names: set = None):
         dep_path = os.path.join(self.source_dir, f"{mod_name}.mpy")
         if not os.path.exists(dep_path):
             print(f"Warning: cannot find {dep_path}", file=sys.stderr)
@@ -2636,6 +2973,7 @@ class Compiler(StmtMixin, ExprMixin):
             structs=dict(self.structs),
             enums=dict(self.enums),
             func_ret_types=dict(self.func_ret_types),
+            _dce_roots=used_names or set(),
         )
         c_src, h_src, mod_info = dep_compiler.compile_file(dep_path, mod_name)
         self.modules[mod_name] = mod_info

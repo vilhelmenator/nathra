@@ -73,6 +73,132 @@ def _compile_native(source: str, dylib_path: str):
         return None
 
 
+def _preprocess_source(source: str) -> str:
+    """Apply struct/union preprocessing."""
+    source = source.replace("\nstruct ", "\nclass ")
+    if source.startswith("struct "):
+        source = "class " + source[7:]
+    source = source.replace("\nunion ", "\n@union\nclass ")
+    return source
+
+
+def _scan_imports(tree, source_dir: str, stdlib_skip: set) -> list:
+    """Scan AST for from-imports, return [(mod_name, {used_names})] in order."""
+    import ast as _ast
+    deps = []
+    seen = set()
+    for node in _ast.iter_child_nodes(tree):
+        if isinstance(node, _ast.ImportFrom):
+            mod = node.module
+            if mod in stdlib_skip or mod in seen:
+                continue
+            mpy_path = os.path.join(source_dir, f"{mod}.mpy")
+            if not os.path.exists(mpy_path):
+                continue
+            used = {alias.name for alias in node.names}
+            deps.append((mod, used, mpy_path))
+            seen.add(mod)
+    return deps
+
+
+def _compile_native_multi(source: str, source_dir: str, dylib_path: str):
+    """Compile source + dependencies using the native compiler's state API.
+
+    Returns dict of {module_name: (c_src, h_src)} or None on failure.
+    """
+    import ast as _ast
+    from compiler.ast_serial import serialize_ast
+
+    _STDLIB_SKIP = {"math", "enum", "micropy", "os", "sys"}
+
+    try:
+        lib = ctypes.CDLL(dylib_path)
+
+        # Set up state API functions
+        state_new = lib.native_state_new
+        state_new.argtypes = []
+        state_new.restype = ctypes.c_void_p
+
+        compile_dep = lib.native_compile_dep
+        compile_dep.argtypes = [
+            ctypes.c_void_p,
+            POINTER(c_uint8), c_int64,
+            POINTER(c_uint8), c_int64,
+            POINTER(POINTER(c_uint8)), POINTER(c_int64),
+            POINTER(POINTER(c_uint8)), POINTER(c_int64),
+        ]
+        compile_dep.restype = c_int32
+
+        compile_main = lib.native_compile_main
+        compile_main.argtypes = [
+            ctypes.c_void_p,
+            POINTER(c_uint8), c_int64,
+            POINTER(POINTER(c_uint8)), POINTER(c_int64),
+        ]
+        compile_main.restype = c_int32
+
+        # Parse main module
+        source_pp = _preprocess_source(source)
+        main_tree = _ast.parse(source_pp)
+        main_ast = serialize_ast(main_tree)
+
+        # Scan imports
+        deps = _scan_imports(main_tree, source_dir, _STDLIB_SKIP)
+
+        # Create state
+        state = state_new()
+        results = {}
+
+        # Compile each dependency
+        for mod_name, used_names, mpy_path in deps:
+            dep_source = open(mpy_path).read()
+            dep_pp = _preprocess_source(dep_source)
+            dep_tree = _ast.parse(dep_pp)
+            dep_ast = serialize_ast(dep_tree)
+
+            dep_buf = (c_uint8 * len(dep_ast))(*dep_ast)
+
+            # Pack used names as null-separated bytes
+            names_bytes = b"\0".join(n.encode() for n in used_names) + b"\0"
+            names_buf = (c_uint8 * len(names_bytes))(*names_bytes)
+
+            out_c = POINTER(c_uint8)()
+            out_c_len = c_int64(0)
+            out_h = POINTER(c_uint8)()
+            out_h_len = c_int64(0)
+
+            rc = compile_dep(state,
+                             dep_buf, c_int64(len(dep_ast)),
+                             names_buf, c_int64(len(names_bytes)),
+                             byref(out_c), byref(out_c_len),
+                             byref(out_h), byref(out_h_len))
+            if rc != 0:
+                return None
+
+            c_src = bytes(out_c[:out_c_len.value]).decode("utf-8", errors="replace")
+            h_src = bytes(out_h[:out_h_len.value]).decode("utf-8", errors="replace")
+            results[mod_name] = (c_src, h_src)
+
+        # Compile main module
+        main_buf = (c_uint8 * len(main_ast))(*main_ast)
+        out_buf = POINTER(c_uint8)()
+        out_len = c_int64(0)
+
+        rc = compile_main(state, main_buf, c_int64(len(main_ast)),
+                          byref(out_buf), byref(out_len))
+        if rc != 0:
+            return None
+
+        main_c = bytes(out_buf[:out_len.value]).decode("utf-8", errors="replace")
+        results["__main__"] = (main_c, "")
+        return results
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def build_once(args, source_dir) -> bool:
     """Compile and link. Returns True on success, False on failure."""
     for _hdr in ("micropy_rt.h", "micropy_types.h"):
@@ -86,6 +212,9 @@ def build_once(args, source_dir) -> bool:
         platform=args.platform,
         emit_line_directives=not getattr(args, 'no_line_directives', False),
         debug_mode=getattr(args, 'debug', False),
+        safe_mode=getattr(args, 'safe', False),
+        reorder_funcs=getattr(args, 'reorder_funcs', False),
+        call_graph_report=getattr(args, 'call_graph', False),
     )
     try:
         c_src, h_src, mod_info = compiler.compile_file(args.source, "__main__")
@@ -189,6 +318,12 @@ def main():
     parser.add_argument("--debug", action="store_true",
                         help="Enable allocation tracking: wraps alloc/free with counters, "
                              "asserts zero live allocations at exit")
+    parser.add_argument("--safe", action="store_true",
+                        help="Enable runtime safety checks: division by zero, bounds, overflow")
+    parser.add_argument("--reorder-funcs", action="store_true",
+                        help="Reorder functions by call-graph weight for I-cache locality")
+    parser.add_argument("--call-graph", action="store_true",
+                        help="Print weighted call graph report (no reordering)")
     args = parser.parse_args()
 
     # Route build.mpy to the build system

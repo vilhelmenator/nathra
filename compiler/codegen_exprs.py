@@ -32,6 +32,29 @@ class ExprMixin:
         return compiled
 
     # -------------------------------------------------------------------
+    # Null safety
+    # -------------------------------------------------------------------
+
+    def _null_check_deref(self, var_name: str, compiled_expr: str) -> None:
+        """Check null state of a pointer variable before dereference.
+
+        - "null" → compile error (always on)
+        - "unknown" + safe_mode → emit runtime check
+        - "non-null" → nothing
+        """
+        state = self._null_states.get(var_name)
+        if state is None:
+            return  # not a tracked pointer variable
+        if state == "null":
+            from compiler.compiler import CompileError
+            print(f"{self._current_file or '?'}:{self._current_line or '?'}: error: "
+                  f"dereference of provably null pointer '{var_name}'",
+                  file=sys.stderr)
+            raise CompileError(f"dereference of provably null pointer '{var_name}'")
+        if state == "unknown" and self.safe_mode:
+            self.emit(f"mp_safe_null_check({compiled_expr}, __FILE__, __LINE__);")
+
+    # -------------------------------------------------------------------
     # Expressions
     # -------------------------------------------------------------------
 
@@ -124,6 +147,22 @@ class ExprMixin:
             right = self.compile_expr(node.right)
             if isinstance(node.op, ast.Pow):
                 return f"pow({left}, {right})"
+            # Safety checks (--safe)
+            if self.safe_mode:
+                _lt = self.infer_type(node.left)
+                _is_int = _lt in ("int64_t", "int", "int32_t", "int16_t", "int8_t",
+                                  "uint64_t", "uint32_t", "uint16_t", "uint8_t")
+                if _is_int:
+                    if isinstance(node.op, (ast.Div, ast.FloorDiv)):
+                        return f"mp_safe_div_i64({left}, {right}, __FILE__, __LINE__)"
+                    if isinstance(node.op, ast.Mod):
+                        return f"mp_safe_mod_i64({left}, {right}, __FILE__, __LINE__)"
+                    if isinstance(node.op, ast.Add):
+                        return f"mp_safe_add_i64({left}, {right}, __FILE__, __LINE__)"
+                    if isinstance(node.op, ast.Sub):
+                        return f"mp_safe_sub_i64({left}, {right}, __FILE__, __LINE__)"
+                    if isinstance(node.op, ast.Mult):
+                        return f"mp_safe_mul_i64({left}, {right}, __FILE__, __LINE__)"
             if isinstance(node.op, ast.FloorDiv):
                 return f"(({left}) / ({right}))"
             op = self.compile_op(node.op)
@@ -263,10 +302,14 @@ class ExprMixin:
                     list_name = self.typed_lists[et]
                     lst = self.compile_expr(node.value)
                     idx = self.compile_expr(node.slice)
+                    if self.safe_mode:
+                        self.emit(f"mp_safe_bounds_check({idx}, {lst}->len, __FILE__, __LINE__);")
                     return f"{list_name}_get({lst}, {idx})"
             if self.infer_type(node.value) == "MpList*":
                 lst = self.compile_expr(node.value)
                 idx = self.compile_expr(node.slice)
+                if self.safe_mode:
+                    self.emit(f"mp_safe_bounds_check({idx}, {lst}->len, __FILE__, __LINE__);")
                 raw = f"mp_list_get({lst}, {idx})"
                 if isinstance(node.value, ast.Name):
                     et = self._list_vars.get(node.value.id)
@@ -288,6 +331,12 @@ class ExprMixin:
                     return self._dict_unbox_val(_raw, _dv_type)
             val = self.compile_expr(node.value)
             sl = self.compile_expr(node.slice)
+            # Bounds check for known arrays (--safe)
+            if self.safe_mode and isinstance(node.value, ast.Name):
+                _ai = self._array_vars.get(node.value.id)
+                if _ai:
+                    _asize = _ai[1]
+                    self.emit(f"mp_safe_bounds_check({sl}, {_asize}, __FILE__, __LINE__);")
             return f"{val}[{sl}]"
 
         if isinstance(node, ast.Attribute):
@@ -326,6 +375,9 @@ class ExprMixin:
                 else:
                     return f"{obj_base}_{attr}(&({val}))"
             if obj_type.endswith("*"):
+                # Null check before pointer dereference
+                if isinstance(node.value, ast.Name):
+                    self._null_check_deref(node.value.id, val)
                 return f"{val}->{attr}"
             return f"{val}.{attr}"
 
@@ -767,6 +819,9 @@ class ExprMixin:
         if fname in ("addr_of", "ref"):
             return f"(&{arg_str})"
         if fname == "deref":
+            # Null check on the pointer argument
+            if node.args and isinstance(node.args[0], ast.Name):
+                self._null_check_deref(node.args[0].id, self.compile_expr(node.args[0]))
             if len(node.args) == 2:
                 ptr_expr = self.compile_expr(node.args[0])
                 val_expr = self.compile_expr(node.args[1])

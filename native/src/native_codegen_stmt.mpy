@@ -183,6 +183,24 @@ def native_compile_aug_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
                 return
     tgt2: str = native_compile_expr(s, p.target)
     val: str = native_compile_expr(s, p.value)
+    # Safety checks for augmented assignment (--safe)
+    if s.safe_mode != 0:
+        if tgt_type == "int64_t" or tgt_type == "int" or tgt_type == "int32_t" or tgt_type == "uint8_t":
+            if p.op == OP_DIV:
+                _emit(s, str_format("%s = mp_safe_div_i64(%s, %s, __FILE__, __LINE__);", tgt2.data, tgt2.data, val.data))
+                return
+            if p.op == OP_MOD:
+                _emit(s, str_format("%s = mp_safe_mod_i64(%s, %s, __FILE__, __LINE__);", tgt2.data, tgt2.data, val.data))
+                return
+            if p.op == OP_ADD:
+                _emit(s, str_format("%s = mp_safe_add_i64(%s, %s, __FILE__, __LINE__);", tgt2.data, tgt2.data, val.data))
+                return
+            if p.op == OP_SUB:
+                _emit(s, str_format("%s = mp_safe_sub_i64(%s, %s, __FILE__, __LINE__);", tgt2.data, tgt2.data, val.data))
+                return
+            if p.op == OP_MULT:
+                _emit(s, str_format("%s = mp_safe_mul_i64(%s, %s, __FILE__, __LINE__);", tgt2.data, tgt2.data, val.data))
+                return
     op: str = native_compile_op(p.op)
     _emit(s, str_format("%s %s= %s;", tgt2.data, op.data, val.data))
 

@@ -1,4 +1,4 @@
-/* mpy_stamp: 1774380182.960063 */
+/* mpy_stamp: 1774477395.056900 */
 #include "micropy_rt.h"
 #include "ast_nodes.h"
 
@@ -439,11 +439,46 @@ AstNodeList ast_nodes_ast_read_node_list(MpReader* restrict r, MpArena* restrict
     }
 }
 
+void ast_nodes_ast_read_arguments(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstArguments* p = mp_arena_alloc(arena, sizeof(AstArguments));
+    p->args = ast_nodes_ast_read_node_list(r, arena);
+    p->vararg = ast_nodes_ast_read_node_field(r, arena);
+    p->defaults = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
 void ast_nodes_ast_read_comprehension(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
     AstComprehension* p = mp_arena_alloc(arena, sizeof(AstComprehension));
     p->target = ast_nodes_ast_read_node_field(r, arena);
     p->iter = ast_nodes_ast_read_node_field(r, arena);
     p->ifs = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_lambda(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstLambda* p = mp_arena_alloc(arena, sizeof(AstLambda));
+    p->args = ast_nodes_ast_read_node(r, arena);
+    p->body = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_joined_str(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstJoinedStr* p = mp_arena_alloc(arena, sizeof(AstJoinedStr));
+    p->values = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+uint8_t ast_nodes_ast_read_op_field(MpReader* r) {
+    "Read FK_OP prefix + op tag.";
+    uint8_t kind = (uint8_t)(mp_read_u8(r));
+    return mp_read_u8(r);
+}
+
+void ast_nodes_ast_read_binop(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstBinOp* p = mp_arena_alloc(arena, sizeof(AstBinOp));
+    p->left = ast_nodes_ast_read_node_field(r, arena);
+    p->op = ast_nodes_ast_read_op_field(r);
+    p->right = ast_nodes_ast_read_node_field(r, arena);
     node->data = p;
 }
 
@@ -460,6 +495,20 @@ void ast_nodes_ast_read_keyword(MpReader* restrict r, MpArena* restrict arena, A
     node->data = p;
 }
 
+void ast_nodes_ast_read_while(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstWhile* p = mp_arena_alloc(arena, sizeof(AstWhile));
+    p->test = ast_nodes_ast_read_node_field(r, arena);
+    p->body = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_withitem(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstWithItem* p = mp_arena_alloc(arena, sizeof(AstWithItem));
+    p->context_expr = ast_nodes_ast_read_node_field(r, arena);
+    p->optional_vars = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
 void ast_nodes_ast_read_import_from(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
     AstImportFrom* p = mp_arena_alloc(arena, sizeof(AstImportFrom));
     p->module = ast_nodes_ast_read_string_field(r, arena);
@@ -467,18 +516,10 @@ void ast_nodes_ast_read_import_from(MpReader* restrict r, MpArena* restrict aren
     node->data = p;
 }
 
-void ast_nodes_ast_read_subscript(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstSubscript* p = mp_arena_alloc(arena, sizeof(AstSubscript));
-    p->value = ast_nodes_ast_read_node_field(r, arena);
-    p->slice = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_alias(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstAlias* p = mp_arena_alloc(arena, sizeof(AstAlias));
-    p->name = ast_nodes_ast_read_string_field(r, arena);
-    p->asname = ast_nodes_ast_read_string_field(r, arena);
-    node->data = p;
+uint8_t ast_nodes_ast_read_bool_field(MpReader* r) {
+    "Read FK_BOOL prefix + bool.";
+    uint8_t kind = (uint8_t)(mp_read_u8(r));
+    return mp_read_u8(r);
 }
 
 int64_t ast_nodes_ast_read_int_field(MpReader* r) {
@@ -491,12 +532,6 @@ double ast_nodes_ast_read_float_field(MpReader* r) {
     "Read FK_FLOAT prefix + f64.";
     uint8_t kind = (uint8_t)(mp_read_u8(r));
     return mp_read_f64(r);
-}
-
-uint8_t ast_nodes_ast_read_bool_field(MpReader* r) {
-    "Read FK_BOOL prefix + bool.";
-    uint8_t kind = (uint8_t)(mp_read_u8(r));
-    return mp_read_u8(r);
 }
 
 void ast_nodes_ast_read_constant(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
@@ -534,17 +569,17 @@ void ast_nodes_ast_read_constant(MpReader* restrict r, MpArena* restrict arena, 
     node->data = p;
 }
 
-uint8_t ast_nodes_ast_read_op_field(MpReader* r) {
-    "Read FK_OP prefix + op tag.";
-    uint8_t kind = (uint8_t)(mp_read_u8(r));
-    return mp_read_u8(r);
+void ast_nodes_ast_read_if(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstIf* p = mp_arena_alloc(arena, sizeof(AstIf));
+    p->test = ast_nodes_ast_read_node_field(r, arena);
+    p->body = ast_nodes_ast_read_node_list(r, arena);
+    p->orelse = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
 }
 
-void ast_nodes_ast_read_aug_assign(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstAugAssign* p = mp_arena_alloc(arena, sizeof(AstAugAssign));
-    p->target = ast_nodes_ast_read_node_field(r, arena);
-    p->op = ast_nodes_ast_read_op_field(r);
-    p->value = ast_nodes_ast_read_node_field(r, arena);
+void ast_nodes_ast_read_set(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstSet* p = mp_arena_alloc(arena, sizeof(AstSet));
+    p->elts = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 
@@ -556,28 +591,19 @@ void ast_nodes_ast_read_ann_assign(MpReader* restrict r, MpArena* restrict arena
     node->data = p;
 }
 
-void ast_nodes_ast_read_module(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstModule* p = mp_arena_alloc(arena, sizeof(AstModule));
-    p->body = ast_nodes_ast_read_node_list(r, arena);
+void ast_nodes_ast_read_call(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstCall* p = mp_arena_alloc(arena, sizeof(AstCall));
+    p->func = ast_nodes_ast_read_node_field(r, arena);
+    p->args = ast_nodes_ast_read_node_list(r, arena);
+    p->keywords = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 
-void ast_nodes_ast_read_match_or(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstMatchOr* p = mp_arena_alloc(arena, sizeof(AstMatchOr));
-    p->patterns = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_assign(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstAssign* p = mp_arena_alloc(arena, sizeof(AstAssign));
-    p->targets = ast_nodes_ast_read_node_list(r, arena);
+void ast_nodes_ast_read_aug_assign(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstAugAssign* p = mp_arena_alloc(arena, sizeof(AstAugAssign));
+    p->target = ast_nodes_ast_read_node_field(r, arena);
+    p->op = ast_nodes_ast_read_op_field(r);
     p->value = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_name(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstName* p = mp_arena_alloc(arena, sizeof(AstName));
-    p->id = ast_nodes_ast_read_string_field(r, arena);
     node->data = p;
 }
 
@@ -595,161 +621,10 @@ void ast_nodes_ast_read_for(MpReader* restrict r, MpArena* restrict arena, AstNo
     node->data = p;
 }
 
-void ast_nodes_ast_read_import(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstImport* p = mp_arena_alloc(arena, sizeof(AstImport));
-    p->names = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_ifexp(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstIfExp* p = mp_arena_alloc(arena, sizeof(AstIfExp));
-    p->test = ast_nodes_ast_read_node_field(r, arena);
-    p->body = ast_nodes_ast_read_node_field(r, arena);
-    p->orelse = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_match_value(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstMatchValue* p = mp_arena_alloc(arena, sizeof(AstMatchValue));
+void ast_nodes_ast_read_assign(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstAssign* p = mp_arena_alloc(arena, sizeof(AstAssign));
+    p->targets = ast_nodes_ast_read_node_list(r, arena);
     p->value = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_call(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstCall* p = mp_arena_alloc(arena, sizeof(AstCall));
-    p->func = ast_nodes_ast_read_node_field(r, arena);
-    p->args = ast_nodes_ast_read_node_list(r, arena);
-    p->keywords = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_joined_str(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstJoinedStr* p = mp_arena_alloc(arena, sizeof(AstJoinedStr));
-    p->values = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_match(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstMatch* p = mp_arena_alloc(arena, sizeof(AstMatch));
-    p->subject = ast_nodes_ast_read_node_field(r, arena);
-    p->cases = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_match_case(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstMatchCase* p = mp_arena_alloc(arena, sizeof(AstMatchCase));
-    p->pattern = ast_nodes_ast_read_node_field(r, arena);
-    p->guard = ast_nodes_ast_read_node_field(r, arena);
-    p->body = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_class_def(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstClassDef* p = mp_arena_alloc(arena, sizeof(AstClassDef));
-    p->name = ast_nodes_ast_read_string_field(r, arena);
-    p->bases = ast_nodes_ast_read_node_list(r, arena);
-    p->keywords = ast_nodes_ast_read_node_list(r, arena);
-    p->body = ast_nodes_ast_read_node_list(r, arena);
-    p->decorators = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_return(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstReturn* p = mp_arena_alloc(arena, sizeof(AstReturn));
-    p->value = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_with(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstWith* p = mp_arena_alloc(arena, sizeof(AstWith));
-    p->items = ast_nodes_ast_read_node_list(r, arena);
-    p->body = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_withitem(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstWithItem* p = mp_arena_alloc(arena, sizeof(AstWithItem));
-    p->context_expr = ast_nodes_ast_read_node_field(r, arena);
-    p->optional_vars = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_list_comp(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstListComp* p = mp_arena_alloc(arena, sizeof(AstListComp));
-    p->elt = ast_nodes_ast_read_node_field(r, arena);
-    p->generators = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_lambda(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstLambda* p = mp_arena_alloc(arena, sizeof(AstLambda));
-    p->args = ast_nodes_ast_read_node(r, arena);
-    p->body = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_assert(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstAssert* p = mp_arena_alloc(arena, sizeof(AstAssert));
-    p->test = ast_nodes_ast_read_node_field(r, arena);
-    p->msg = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_boolop(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstBoolOp* p = mp_arena_alloc(arena, sizeof(AstBoolOp));
-    p->op = ast_nodes_ast_read_op_field(r);
-    p->values = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_if(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstIf* p = mp_arena_alloc(arena, sizeof(AstIf));
-    p->test = ast_nodes_ast_read_node_field(r, arena);
-    p->body = ast_nodes_ast_read_node_list(r, arena);
-    p->orelse = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_list(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstList* p = mp_arena_alloc(arena, sizeof(AstList));
-    p->elts = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_match_as(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstMatchAs* p = mp_arena_alloc(arena, sizeof(AstMatchAs));
-    p->pattern = ast_nodes_ast_read_node_field(r, arena);
-    p->name = ast_nodes_ast_read_string_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_arg(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstArg* p = mp_arena_alloc(arena, sizeof(AstArg));
-    p->name = ast_nodes_ast_read_string_field(r, arena);
-    p->annotation = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_binop(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstBinOp* p = mp_arena_alloc(arena, sizeof(AstBinOp));
-    p->left = ast_nodes_ast_read_node_field(r, arena);
-    p->op = ast_nodes_ast_read_op_field(r);
-    p->right = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_dict(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstDict* p = mp_arena_alloc(arena, sizeof(AstDict));
-    p->keys = ast_nodes_ast_read_node_list(r, arena);
-    p->values = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_arguments(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstArguments* p = mp_arena_alloc(arena, sizeof(AstArguments));
-    p->args = ast_nodes_ast_read_node_list(r, arena);
-    p->vararg = ast_nodes_ast_read_node_field(r, arena);
-    p->defaults = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 
@@ -770,11 +645,41 @@ void ast_nodes_ast_read_unaryop(MpReader* restrict r, MpArena* restrict arena, A
     node->data = p;
 }
 
+void ast_nodes_ast_read_match_as(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstMatchAs* p = mp_arena_alloc(arena, sizeof(AstMatchAs));
+    p->pattern = ast_nodes_ast_read_node_field(r, arena);
+    p->name = ast_nodes_ast_read_string_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_tuple(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstTuple* p = mp_arena_alloc(arena, sizeof(AstTuple));
+    p->elts = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
 void ast_nodes_ast_read_formatted_value(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
     AstFormattedValue* p = mp_arena_alloc(arena, sizeof(AstFormattedValue));
     p->value = ast_nodes_ast_read_node_field(r, arena);
     p->conversion = ast_nodes_ast_read_int_field(r);
     p->format_spec = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_class_def(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstClassDef* p = mp_arena_alloc(arena, sizeof(AstClassDef));
+    p->name = ast_nodes_ast_read_string_field(r, arena);
+    p->bases = ast_nodes_ast_read_node_list(r, arena);
+    p->keywords = ast_nodes_ast_read_node_list(r, arena);
+    p->body = ast_nodes_ast_read_node_list(r, arena);
+    p->decorators = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_with(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstWith* p = mp_arena_alloc(arena, sizeof(AstWith));
+    p->items = ast_nodes_ast_read_node_list(r, arena);
+    p->body = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 
@@ -785,9 +690,90 @@ void ast_nodes_ast_read_attribute(MpReader* restrict r, MpArena* restrict arena,
     node->data = p;
 }
 
-void ast_nodes_ast_read_set(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstSet* p = mp_arena_alloc(arena, sizeof(AstSet));
+void ast_nodes_ast_read_list(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstList* p = mp_arena_alloc(arena, sizeof(AstList));
     p->elts = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_alias(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstAlias* p = mp_arena_alloc(arena, sizeof(AstAlias));
+    p->name = ast_nodes_ast_read_string_field(r, arena);
+    p->asname = ast_nodes_ast_read_string_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_match_case(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstMatchCase* p = mp_arena_alloc(arena, sizeof(AstMatchCase));
+    p->pattern = ast_nodes_ast_read_node_field(r, arena);
+    p->guard = ast_nodes_ast_read_node_field(r, arena);
+    p->body = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_list_comp(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstListComp* p = mp_arena_alloc(arena, sizeof(AstListComp));
+    p->elt = ast_nodes_ast_read_node_field(r, arena);
+    p->generators = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_ifexp(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstIfExp* p = mp_arena_alloc(arena, sizeof(AstIfExp));
+    p->test = ast_nodes_ast_read_node_field(r, arena);
+    p->body = ast_nodes_ast_read_node_field(r, arena);
+    p->orelse = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_assert(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstAssert* p = mp_arena_alloc(arena, sizeof(AstAssert));
+    p->test = ast_nodes_ast_read_node_field(r, arena);
+    p->msg = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_import(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstImport* p = mp_arena_alloc(arena, sizeof(AstImport));
+    p->names = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_match_or(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstMatchOr* p = mp_arena_alloc(arena, sizeof(AstMatchOr));
+    p->patterns = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_name(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstName* p = mp_arena_alloc(arena, sizeof(AstName));
+    p->id = ast_nodes_ast_read_string_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_dict(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstDict* p = mp_arena_alloc(arena, sizeof(AstDict));
+    p->keys = ast_nodes_ast_read_node_list(r, arena);
+    p->values = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_match_value(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstMatchValue* p = mp_arena_alloc(arena, sizeof(AstMatchValue));
+    p->value = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_arg(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstArg* p = mp_arena_alloc(arena, sizeof(AstArg));
+    p->name = ast_nodes_ast_read_string_field(r, arena);
+    p->annotation = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_module(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstModule* p = mp_arena_alloc(arena, sizeof(AstModule));
+    p->body = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 
@@ -804,22 +790,36 @@ void ast_nodes_ast_read_compare(MpReader* restrict r, MpArena* restrict arena, A
     node->data = p;
 }
 
+void ast_nodes_ast_read_boolop(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstBoolOp* p = mp_arena_alloc(arena, sizeof(AstBoolOp));
+    p->op = ast_nodes_ast_read_op_field(r);
+    p->values = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_return(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstReturn* p = mp_arena_alloc(arena, sizeof(AstReturn));
+    p->value = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_subscript(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstSubscript* p = mp_arena_alloc(arena, sizeof(AstSubscript));
+    p->value = ast_nodes_ast_read_node_field(r, arena);
+    p->slice = ast_nodes_ast_read_node_field(r, arena);
+    node->data = p;
+}
+
+void ast_nodes_ast_read_match(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
+    AstMatch* p = mp_arena_alloc(arena, sizeof(AstMatch));
+    p->subject = ast_nodes_ast_read_node_field(r, arena);
+    p->cases = ast_nodes_ast_read_node_list(r, arena);
+    node->data = p;
+}
+
 void ast_nodes_ast_read_raise(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
     AstRaise* p = mp_arena_alloc(arena, sizeof(AstRaise));
     p->exc = ast_nodes_ast_read_node_field(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_tuple(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstTuple* p = mp_arena_alloc(arena, sizeof(AstTuple));
-    p->elts = ast_nodes_ast_read_node_list(r, arena);
-    node->data = p;
-}
-
-void ast_nodes_ast_read_while(MpReader* restrict r, MpArena* restrict arena, AstNode* restrict node) {
-    AstWhile* p = mp_arena_alloc(arena, sizeof(AstWhile));
-    p->test = ast_nodes_ast_read_node_field(r, arena);
-    p->body = ast_nodes_ast_read_node_list(r, arena);
     node->data = p;
 }
 

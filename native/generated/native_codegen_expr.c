@@ -1,4 +1,4 @@
-/* mpy_stamp: 1774473831.350640 */
+/* mpy_stamp: 1774530501.865886 */
 #include "micropy_rt.h"
 #include "native_codegen_expr.h"
 
@@ -250,6 +250,26 @@ MpStr* native_codegen_expr_native_compile_expr(CompilerState* restrict s, const 
         if ((p3->op == OP_POW)) {
             return mp_str_format("pow(%s, %s)", left3->data, right3->data);
         }
+        if ((s->safe_mode != 0)) {
+            MpStr* lt3 = native_infer_native_infer_type(s, p3->left);
+            if ((mp_str_eq(lt3, (&(MpStr){.data=(char*)"int64_t",.len=7})) || mp_str_eq(lt3, (&(MpStr){.data=(char*)"int",.len=3})) || mp_str_eq(lt3, (&(MpStr){.data=(char*)"int32_t",.len=7})) || mp_str_eq(lt3, (&(MpStr){.data=(char*)"uint8_t",.len=7})))) {
+                if (((p3->op == OP_DIV) || (p3->op == OP_FLOOR_DIV))) {
+                    return mp_str_format("mp_safe_div_i64(%s, %s, __FILE__, __LINE__)", left3->data, right3->data);
+                }
+                if ((p3->op == OP_MOD)) {
+                    return mp_str_format("mp_safe_mod_i64(%s, %s, __FILE__, __LINE__)", left3->data, right3->data);
+                }
+                if ((p3->op == OP_ADD)) {
+                    return mp_str_format("mp_safe_add_i64(%s, %s, __FILE__, __LINE__)", left3->data, right3->data);
+                }
+                if ((p3->op == OP_SUB)) {
+                    return mp_str_format("mp_safe_sub_i64(%s, %s, __FILE__, __LINE__)", left3->data, right3->data);
+                }
+                if ((p3->op == OP_MULT)) {
+                    return mp_str_format("mp_safe_mul_i64(%s, %s, __FILE__, __LINE__)", left3->data, right3->data);
+                }
+            }
+        }
         if ((p3->op == OP_FLOOR_DIV)) {
             return mp_str_format("((%s) / (%s))", left3->data, right3->data);
         }
@@ -417,6 +437,9 @@ MpStr* native_codegen_expr_native_compile_expr(CompilerState* restrict s, const 
                 if ((sub_ln != NULL)) {
                     MpStr* lst = native_codegen_expr_native_compile_expr(s, p9->value);
                     MpStr* idx = native_codegen_expr_native_compile_expr(s, p9->slice);
+                    if ((s->safe_mode != 0)) {
+                        native_codegen_expr__emit(s, mp_str_format("mp_safe_bounds_check(%s, %s->len, __FILE__, __LINE__);", idx->data, lst->data));
+                    }
                     return mp_str_format("%s_get(%s, %s)", sub_ln->data, lst->data, idx->data);
                 }
             }
@@ -436,6 +459,13 @@ MpStr* native_codegen_expr_native_compile_expr(CompilerState* restrict s, const 
         }
         MpStr* val = native_codegen_expr_native_compile_expr(s, p9->value);
         MpStr* sl = native_codegen_expr_native_compile_expr(s, p9->slice);
+        if (((s->safe_mode != 0) && (p9->value != NULL) && (p9->value->tag == TAG_NAME))) {
+            AstName* arr_n = p9->value->data;
+            ArrayInfo* arr_ai = strmap_strmap_get((&s->array_vars), arr_n->id);
+            if ((arr_ai != NULL)) {
+                native_codegen_expr__emit(s, mp_str_format("mp_safe_bounds_check(%s, %s, __FILE__, __LINE__);", sl->data, arr_ai->size->data));
+            }
+        }
         return mp_str_format("%s[%s]", val->data, sl->data);
     }
     if ((node->tag == TAG_ATTRIBUTE)) {
@@ -450,6 +480,9 @@ MpStr* native_codegen_expr_native_compile_expr(CompilerState* restrict s, const 
         MpStr* val2 = native_codegen_expr_native_compile_expr(s, p10->value);
         MpStr* obj_type = native_infer_native_infer_type(s, p10->value);
         if (native_infer__ends_with_star(obj_type)) {
+            if (((s->safe_mode != 0) && (p10->value != NULL) && (p10->value->tag == TAG_NAME))) {
+                native_codegen_expr__emit(s, mp_str_format("mp_safe_null_check(%s, __FILE__, __LINE__);", val2->data));
+            }
             return mp_str_format("%s->%s", val2->data, attr_name->data);
         }
         return mp_str_format("%s.%s", val2->data, attr_name->data);

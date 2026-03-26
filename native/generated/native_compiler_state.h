@@ -37,6 +37,9 @@ struct CompilerState {
     StrMap modules;
     MpStr* current_module;
     MpStr* current_func_ret_type;
+    int32_t safe_mode;
+    int32_t reorder_funcs;
+    StrSet* dce_roots;
     int32_t fstr_counter;
     int32_t lambda_counter;
     int32_t lc_counter;

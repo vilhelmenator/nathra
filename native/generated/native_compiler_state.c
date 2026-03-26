@@ -1,8 +1,8 @@
-/* mpy_stamp: 1774377911.535924 */
+/* mpy_stamp: 1774530501.865886 */
 #include "micropy_rt.h"
 #include "native_compiler_state.h"
 
-static inline CompilerState _mp_make_CompilerState(MpWriter* lines, MpWriter* header, int32_t indent, StrMap local_vars, StrMap func_args, StrMap structs, StrMap constants, StrMap mutable_globals, StrMap enums, StrMap func_ret_types, StrMap func_param_types, StrMap func_param_order, StrMap typed_lists, StrMap array_vars, StrMap list_vars, StrMap funcptr_rettypes, StrMap struct_array_fields, StrMap struct_properties, StrMap result_types, StrSet cold_funcs, StrSet extern_funcs, StrSet serializable_structs, StrSet str_literal_vars, StrMap from_imports, StrMap modules, MpStr* current_module, MpStr* current_func_ret_type, int32_t fstr_counter, int32_t lambda_counter, int32_t lc_counter, int32_t try_counter, int32_t thread_spawn_counter) {
+static inline CompilerState _mp_make_CompilerState(MpWriter* lines, MpWriter* header, int32_t indent, StrMap local_vars, StrMap func_args, StrMap structs, StrMap constants, StrMap mutable_globals, StrMap enums, StrMap func_ret_types, StrMap func_param_types, StrMap func_param_order, StrMap typed_lists, StrMap array_vars, StrMap list_vars, StrMap funcptr_rettypes, StrMap struct_array_fields, StrMap struct_properties, StrMap result_types, StrSet cold_funcs, StrSet extern_funcs, StrSet serializable_structs, StrSet str_literal_vars, StrMap from_imports, StrMap modules, MpStr* current_module, MpStr* current_func_ret_type, int32_t safe_mode, int32_t reorder_funcs, StrSet* dce_roots, int32_t fstr_counter, int32_t lambda_counter, int32_t lc_counter, int32_t try_counter, int32_t thread_spawn_counter) {
     CompilerState _s = {0};
     _s.lines = lines;
     _s.header = header;
@@ -31,6 +31,9 @@ static inline CompilerState _mp_make_CompilerState(MpWriter* lines, MpWriter* he
     _s.modules = modules;
     _s.current_module = current_module;
     _s.current_func_ret_type = current_func_ret_type;
+    _s.safe_mode = safe_mode;
+    _s.reorder_funcs = reorder_funcs;
+    _s.dce_roots = dce_roots;
     _s.fstr_counter = fstr_counter;
     _s.lambda_counter = lambda_counter;
     _s.lc_counter = lc_counter;
@@ -88,7 +91,7 @@ MpStr* native_compiler_state_field_list_find(const FieldList* restrict fl, const
 CompilerState native_compiler_state_compiler_state_new(void) {
     "Create a fresh compiler state with all maps initialized.";
     {
-        CompilerState s = (CompilerState){NULL, NULL, 0, strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(64), strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strmap_new(32), strmap_strmap_new(16), NULL, NULL, 0, 0, 0, 0, 0};
+        CompilerState s = (CompilerState){NULL, NULL, 0, strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(64), strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strmap_new(32), strmap_strmap_new(16), NULL, NULL, 0, 0, NULL, 0, 0, 0, 0, 0};
         s.lines = mp_writer_new(4096);
         return s;
     }

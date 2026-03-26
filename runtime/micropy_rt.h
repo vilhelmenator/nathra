@@ -1194,4 +1194,65 @@ static inline MpStr* mp_input(const char* prompt) {
     return mp_str_new(_buf);
 }
 
+/* ---- Safety checks (--safe) ---- */
+#ifdef MP_SAFE
+
+__attribute__((cold, noreturn))
+static void _mp_safe_panic(const char* msg, const char* file, int line) {
+    fprintf(stderr, "%s:%d: %s\n", file, line, msg);
+    abort();
+}
+
+/* Division by zero */
+static inline int64_t mp_safe_div_i64(int64_t a, int64_t b, const char* file, int line) {
+    if (__builtin_expect(b == 0, 0))
+        _mp_safe_panic("division by zero", file, line);
+    if (__builtin_expect(a == INT64_MIN && b == -1, 0))
+        _mp_safe_panic("integer overflow in division (INT64_MIN / -1)", file, line);
+    return a / b;
+}
+static inline int64_t mp_safe_mod_i64(int64_t a, int64_t b, const char* file, int line) {
+    if (__builtin_expect(b == 0, 0))
+        _mp_safe_panic("division by zero (modulo)", file, line);
+    return a % b;
+}
+
+/* Bounds checking */
+static inline void mp_safe_bounds_check(int64_t idx, int64_t len, const char* file, int line) {
+    if (__builtin_expect(idx < 0 || idx >= len, 0)) {
+        char _buf[128];
+        snprintf(_buf, sizeof(_buf), "index %lld out of bounds (size %lld)",
+                 (long long)idx, (long long)len);
+        _mp_safe_panic(_buf, file, line);
+    }
+}
+
+/* Integer overflow */
+static inline int64_t mp_safe_add_i64(int64_t a, int64_t b, const char* file, int line) {
+    int64_t r;
+    if (__builtin_expect(__builtin_add_overflow(a, b, &r), 0))
+        _mp_safe_panic("integer overflow in addition", file, line);
+    return r;
+}
+static inline int64_t mp_safe_sub_i64(int64_t a, int64_t b, const char* file, int line) {
+    int64_t r;
+    if (__builtin_expect(__builtin_sub_overflow(a, b, &r), 0))
+        _mp_safe_panic("integer overflow in subtraction", file, line);
+    return r;
+}
+static inline int64_t mp_safe_mul_i64(int64_t a, int64_t b, const char* file, int line) {
+    int64_t r;
+    if (__builtin_expect(__builtin_mul_overflow(a, b, &r), 0))
+        _mp_safe_panic("integer overflow in multiplication", file, line);
+    return r;
+}
+
+/* Null pointer dereference */
+static inline void mp_safe_null_check(const void* p, const char* file, int line) {
+    if (__builtin_expect(p == NULL, 0))
+        _mp_safe_panic("null pointer dereference", file, line);
+}
+
+#endif /* MP_SAFE */
+
 #endif /* MICROPY_RT_H */

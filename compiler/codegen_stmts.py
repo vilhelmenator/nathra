@@ -693,6 +693,7 @@ class StmtMixin:
         self._array_vars = {}
         self._list_vars = {}
         self._vec_vars = {}
+        self._null_states = self._null_analyze(node)
 
         # Restrict inference: collect ptr params (≥2 required), then check aliasing.
         _all_ptr_params = {
@@ -1503,6 +1504,8 @@ class StmtMixin:
                         lst = self.compile_expr(target.value)
                         idx = self.compile_expr(target.slice)
                         v = self.compile_expr(val_node)
+                        if self.safe_mode:
+                            self.emit(f"mp_safe_bounds_check({idx}, {lst}->len, __FILE__, __LINE__);")
                         self.emit(f"{_lname}_set({lst}, {idx}, {v});")
                         continue
                 # MpList* → mp_list_set with auto-boxing
@@ -1514,6 +1517,8 @@ class StmtMixin:
                     if vt == "double":   boxed = f"mp_val_float({v})"
                     elif vt == "MpStr*": boxed = f"mp_val_str({v})"
                     else:                boxed = f"mp_val_int((int64_t)({v}))"
+                    if self.safe_mode:
+                        self.emit(f"mp_safe_bounds_check({idx}, {lst}->len, __FILE__, __LINE__);")
                     self.emit(f"mp_list_set({lst}, {idx}, {boxed});")
                     continue
                 # Dict subscript write: d["key"] = val → dict_set(d, key, val_T(val))
@@ -1539,6 +1544,13 @@ class StmtMixin:
             val = self.compile_expr(val_node)
             tgt = self.compile_expr(target)
             val = self._coerce(val, self.infer_type(val_node), self._dest_type(target))
+            # Bounds check for array subscript writes (--safe)
+            if self.safe_mode and isinstance(target, ast.Subscript):
+                if isinstance(target.value, ast.Name):
+                    _ai = self._array_vars.get(target.value.id)
+                    if _ai:
+                        _idx = self.compile_expr(target.slice)
+                        self.emit(f"mp_safe_bounds_check({_idx}, {_ai[1]}, __FILE__, __LINE__);")
             self.emit(f"{tgt} = {val};")
 
     def compile_aug_assign(self, node: ast.AugAssign):
@@ -1563,6 +1575,26 @@ class StmtMixin:
                 return
         tgt = self.compile_expr(node.target)
         val = self.compile_expr(node.value)
+        # Safety checks for augmented assignment (--safe)
+        if self.safe_mode:
+            _tt = self.infer_type(node.target)
+            _is_int = _tt in ("int64_t", "int", "int32_t", "int16_t", "int8_t",
+                              "uint64_t", "uint32_t", "uint16_t", "uint8_t")
+            if _is_int:
+                _safe = None
+                if isinstance(node.op, (ast.Div, ast.FloorDiv)):
+                    _safe = "mp_safe_div_i64"
+                elif isinstance(node.op, ast.Mod):
+                    _safe = "mp_safe_mod_i64"
+                elif isinstance(node.op, ast.Add):
+                    _safe = "mp_safe_add_i64"
+                elif isinstance(node.op, ast.Sub):
+                    _safe = "mp_safe_sub_i64"
+                elif isinstance(node.op, ast.Mult):
+                    _safe = "mp_safe_mul_i64"
+                if _safe:
+                    self.emit(f"{tgt} = {_safe}({tgt}, {val}, __FILE__, __LINE__);")
+                    return
         op = self.compile_op(node.op)
         self.emit(f"{tgt} {op}= {val};")
 
@@ -1703,8 +1735,25 @@ class StmtMixin:
         else:
             self.emit(f"if ({cond}) {{")
         self.indent += 1
+        # Null narrowing: if p is not None → p is non-null in body
+        _narrowed_var = None
+        _saved_null_state = None
+        if (isinstance(node.test, ast.Compare)
+                and len(node.test.ops) == 1
+                and isinstance(node.test.ops[0], ast.IsNot)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value is None
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id in self._null_states):
+            _narrowed_var = node.test.left.id
+            _saved_null_state = self._null_states[_narrowed_var]
+            self._null_states[_narrowed_var] = "non-null"
         for stmt in node.body:
             self.compile_stmt(stmt)
+        # Restore null state after the if body
+        if _narrowed_var is not None:
+            self._null_states[_narrowed_var] = _saved_null_state
         self.indent -= 1
         if node.orelse:
             if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
@@ -1757,8 +1806,24 @@ class StmtMixin:
         if _ll_var is not None:
             self.emit(f"if ({_ll_var}->{_ll_field}) "
                       f"MP_PREFETCH({_ll_var}->{_ll_field}->{_ll_field}, 0, 1);")
+        # Null narrowing: while p is not None → p is non-null in body
+        _w_narrowed = None
+        _w_saved = None
+        if (isinstance(node.test, ast.Compare)
+                and len(node.test.ops) == 1
+                and isinstance(node.test.ops[0], ast.IsNot)
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast.Constant)
+                and node.test.comparators[0].value is None
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id in self._null_states):
+            _w_narrowed = node.test.left.id
+            _w_saved = self._null_states[_w_narrowed]
+            self._null_states[_w_narrowed] = "non-null"
         for stmt in node.body:
             self.compile_stmt(stmt)
+        if _w_narrowed is not None:
+            self._null_states[_w_narrowed] = _w_saved
         self.indent -= 1
         self.emit("}")
 

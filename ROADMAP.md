@@ -768,14 +768,14 @@ Work items:
 10. Auto-defer for str/list/dict      ✅
 ```
 
-## Next up — safety checks
+## Safety checks (`--safe`)
 
 ```
- 1. Division by zero          (smallest standalone check, proves the --safe flag plumbing)
- 2. Null analysis (static)    (three-value lattice, compile errors for provably-null — always on)
- 3. Null checks (runtime)     (emit checks for `unknown` state under --safe)
- 4. Out of bounds             (array + list)
- 5. Integer overflow           (__builtin_*_overflow wrappers)
+ 1. Division by zero          ✅  (mp_safe_div_i64 / mp_safe_mod_i64)
+ 2. Null analysis (static)    ✅  (three-value lattice, compile errors for provably-null — always on)
+ 3. Null checks (runtime)     ✅  (mp_safe_null_check for `unknown` state under --safe)
+ 4. Out of bounds             ✅  (mp_safe_bounds_check for array + list)
+ 5. Integer overflow           ✅  (__builtin_*_overflow via mp_safe_add/sub/mul_i64)
 ```
 
 Division by zero first to prove the `--safe` flag plumbing end-to-end,
@@ -988,6 +988,85 @@ python3 cli/mpy.py program.mpy                     # release: no checks (default
 The `--safe` flag can be combined with `--flags="-O2"` — the checks are
 branch-predicted-not-taken and cold-pathed, so the performance cost with
 optimization is typically under 2% for compute-heavy code.
+
+---
+
+## Weighted call graph for function ordering
+
+Static PGO-style function layout without needing profile runs. The compiler
+already walks every callsite during analysis — this adds edge accumulation
+and a layout pass.
+
+### Building the graph
+
+During the existing AST walk, for every `AstTag.CALL` that resolves to a
+known function in the same module, record a weighted edge between caller
+and callee:
+
+| Context | Weight multiplier |
+|---------|-------------------|
+| Top-level call | 1× |
+| Inside `for`/`while` loop | 10× per nesting level |
+| Inside `@hot` function | 5× |
+| Inside cold/error path (`@cold`, `raise`, after `if err`) | 0.1× |
+| Recursive self-call | 0× (doesn't affect ordering) |
+
+The result is a weighted undirected graph over all functions in the module.
+Functions that call each other frequently in hot loops get heavy edges;
+error-handling helpers get light ones.
+
+### Layout algorithm
+
+Arrange functions in a linear order that minimizes `Σ weight × distance`
+across all edges. This is the minimum linear arrangement problem — NP-hard
+in general, but a greedy heuristic works well at function granularity:
+
+1. Seed with the heaviest edge — place those two functions adjacent.
+2. For each remaining function (sorted by total edge weight, descending),
+   insert it adjacent to its highest-weight already-placed neighbor.
+3. Ties broken by source order for stability.
+
+This is essentially what PGO linkers do with basic block reordering (BOLT,
+`-forder-file`), just at function granularity and from static analysis
+rather than runtime counters.
+
+### Output modes
+
+Two ways to use the result:
+
+**Automatic (default).** The compiler reorders function emissions in
+`compile_file` so the generated C has functions laid out in call-graph order.
+The linker preserves source order for functions within a translation unit,
+so this directly controls the final binary layout without needing a link-time
+order file.
+
+**Report.** `--call-graph` flag emits a report showing the suggested ordering
+and the heaviest edges, so you can reorganize your `.mpy` source to match:
+
+```
+call graph: native_codegen_stmt.mpy
+  compile_stmt ↔ compile_expr        weight: 450
+  compile_stmt ↔ compile_assign      weight: 120
+  compile_expr ↔ compile_call        weight: 380
+  compile_call ↔ compile_builtin     weight: 210
+  ...
+suggested order:
+  1. compile_expr
+  2. compile_call
+  3. compile_builtin
+  4. compile_stmt
+  5. compile_assign
+  ...
+```
+
+### What this buys
+
+Functions that call each other land in the same or adjacent cache lines.
+The I-cache benefit is most visible in the compiler itself — deep mutual
+recursion between `compile_expr`, `compile_call`, `compile_stmt`, and
+`compile_binop` means those four functions should be physically adjacent.
+At 4ms total compile time the absolute savings are small, but the technique
+applies to any micropy project with hot call loops.
 
 ---
 

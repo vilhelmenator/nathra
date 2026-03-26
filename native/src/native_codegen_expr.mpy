@@ -194,6 +194,20 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         right3: str = native_compile_expr(s, p3.right)
         if p3.op == OP_POW:
             return str_format("pow(%s, %s)", left3.data, right3.data)
+        # Safety checks (--safe)
+        if s.safe_mode != 0:
+            lt3: str = native_infer_type(s, p3.left)
+            if lt3 == "int64_t" or lt3 == "int" or lt3 == "int32_t" or lt3 == "uint8_t":
+                if p3.op == OP_DIV or p3.op == OP_FLOOR_DIV:
+                    return str_format("mp_safe_div_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_MOD:
+                    return str_format("mp_safe_mod_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_ADD:
+                    return str_format("mp_safe_add_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_SUB:
+                    return str_format("mp_safe_sub_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_MULT:
+                    return str_format("mp_safe_mul_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
         if p3.op == OP_FLOOR_DIV:
             return str_format("((%s) / (%s))", left3.data, right3.data)
         op: str = native_compile_op(p3.op)
@@ -340,6 +354,8 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
                 if sub_ln is not None:
                     lst: str = native_compile_expr(s, p9.value)
                     idx: str = native_compile_expr(s, p9.slice)
+                    if s.safe_mode != 0:
+                        _emit(s, str_format("mp_safe_bounds_check(%s, %s->len, __FILE__, __LINE__);", idx.data, lst.data))
                     return str_format("%s_get(%s, %s)", sub_ln.data, lst.data, idx.data)
         # Dict subscript read: d["key"] → unbox(dict_get(d, key))
         if p9.value is not None and p9.value.tag == TAG_NAME:
@@ -354,6 +370,12 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
                 return str_format("mp_as_int(%s)", d_raw.data)
         val: str = native_compile_expr(s, p9.value)
         sl: str = native_compile_expr(s, p9.slice)
+        # Bounds check for known arrays (--safe)
+        if s.safe_mode != 0 and p9.value is not None and p9.value.tag == TAG_NAME:
+            arr_n: ptr[AstName] = p9.value.data
+            arr_ai: ptr[ArrayInfo] = strmap_get(addr_of(s.array_vars), arr_n.id)
+            if arr_ai is not None:
+                _emit(s, str_format("mp_safe_bounds_check(%s, %s, __FILE__, __LINE__);", sl.data, arr_ai.size.data))
         return str_format("%s[%s]", val.data, sl.data)
 
     # ── 4.4: Attribute ──────────────────────────────────────────────
@@ -368,6 +390,9 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         val2: str = native_compile_expr(s, p10.value)
         obj_type: str = native_infer_type(s, p10.value)
         if _ends_with_star(obj_type):
+            # Null check before pointer dereference (--safe)
+            if s.safe_mode != 0 and p10.value is not None and p10.value.tag == TAG_NAME:
+                _emit(s, str_format("mp_safe_null_check(%s, __FILE__, __LINE__);", val2.data))
             return str_format("%s->%s", val2.data, attr_name.data)
         return str_format("%s.%s", val2.data, attr_name.data)
 
