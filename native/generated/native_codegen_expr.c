@@ -1,4 +1,4 @@
-/* mpy_stamp: 1774537280.402267 */
+/* mpy_stamp: 1774564649.180125 */
 #include "micropy_rt.h"
 #include "native_codegen_expr.h"
 

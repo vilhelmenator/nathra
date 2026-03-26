@@ -469,6 +469,56 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         base: str = _strip_ptr(obj_type)
         attr: str = pa.attr
 
+        # os.path.func() — two-level attribute: os.path is the obj, func is the attr
+        if pa.value is not None and pa.value.tag == TAG_ATTRIBUTE:
+            inner: ptr[AstAttribute] = pa.value.data
+            if inner.value is not None and inner.value.tag == TAG_NAME:
+                mod_n: ptr[AstName] = inner.value.data
+                if str_eq(mod_n.id, str_new("os")) and str_eq(inner.attr, str_new("path")):
+                    c_os_path: str = str_new("")
+                    if str_eq(attr, str_new("join")):
+                        c_os_path = str_new("mp_path_join")
+                    elif str_eq(attr, str_new("basename")):
+                        c_os_path = str_new("mp_path_basename")
+                    elif str_eq(attr, str_new("dirname")):
+                        c_os_path = str_new("mp_path_dirname")
+                    elif str_eq(attr, str_new("ext")):
+                        c_os_path = str_new("mp_path_ext")
+                    if str_len(c_os_path) > 0:
+                        if arg_parts is not None:
+                            free(arg_parts)
+                        return str_format("%s(%s)", c_os_path.data, arg_str.data)
+
+        # os.func() — single-level attribute
+        if pa.value is not None and pa.value.tag == TAG_NAME:
+            os_n: ptr[AstName] = pa.value.data
+            if str_eq(os_n.id, str_new("os")):
+                c_os: str = str_new("")
+                if str_eq(attr, str_new("exists")):
+                    c_os = str_new("mp_file_exists")
+                elif str_eq(attr, str_new("file_size")):
+                    c_os = str_new("mp_file_size")
+                elif str_eq(attr, str_new("remove")):
+                    c_os = str_new("mp_remove")
+                elif str_eq(attr, str_new("rename")):
+                    c_os = str_new("mp_rename")
+                elif str_eq(attr, str_new("mkdir")):
+                    c_os = str_new("mp_dir_create")
+                elif str_eq(attr, str_new("rmdir")):
+                    c_os = str_new("mp_dir_remove")
+                elif str_eq(attr, str_new("isdir")):
+                    c_os = str_new("mp_dir_exists")
+                elif str_eq(attr, str_new("getcwd")):
+                    c_os = str_new("mp_dir_cwd")
+                elif str_eq(attr, str_new("listdir")):
+                    c_os = str_new("mp_dir_list")
+                elif str_eq(attr, str_new("chdir")):
+                    c_os = str_new("mp_dir_chdir")
+                if str_len(c_os) > 0:
+                    if arg_parts is not None:
+                        free(arg_parts)
+                    return str_format("%s(%s)", c_os.data, arg_str.data)
+
         # MpStr method dispatch — map to mp_str_* functions
         if obj_type == "MpStr*":
             c_fn: str = str_format("mp_str_%s", attr.data)

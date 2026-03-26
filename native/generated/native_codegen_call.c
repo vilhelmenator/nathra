@@ -1,4 +1,4 @@
-/* mpy_stamp: 1774537280.402267 */
+/* mpy_stamp: 1774568699.738692 */
 #include "micropy_rt.h"
 #include "native_codegen_call.h"
 
@@ -410,6 +410,75 @@ MpStr* native_codegen_call_native_compile_call(CompilerState* restrict s, const 
         MpStr* obj_type = native_infer_native_infer_type(s, pa->value);
         MpStr* base = native_infer__strip_ptr(obj_type);
         MpStr* attr = pa->attr;
+        if (((pa->value != NULL) && (pa->value->tag == TAG_ATTRIBUTE))) {
+            AstAttribute* inner = pa->value->data;
+            if (((inner->value != NULL) && (inner->value->tag == TAG_NAME))) {
+                AstName* mod_n = inner->value->data;
+                if ((mp_str_eq(mod_n->id, mp_str_new("os")) && mp_str_eq(inner->attr, mp_str_new("path")))) {
+                    MpStr* c_os_path = mp_str_new("");
+                    if (mp_str_eq(attr, mp_str_new("join"))) {
+                        c_os_path = mp_str_new("mp_path_join");
+                    } else 
+                    if (mp_str_eq(attr, mp_str_new("basename"))) {
+                        c_os_path = mp_str_new("mp_path_basename");
+                    } else 
+                    if (mp_str_eq(attr, mp_str_new("dirname"))) {
+                        c_os_path = mp_str_new("mp_path_dirname");
+                    } else 
+                    if (mp_str_eq(attr, mp_str_new("ext"))) {
+                        c_os_path = mp_str_new("mp_path_ext");
+                    }
+                    if ((mp_str_len(c_os_path) > 0)) {
+                        if ((arg_parts != NULL)) {
+                            free(arg_parts);
+                        }
+                        return mp_str_format("%s(%s)", c_os_path->data, arg_str->data);
+                    }
+                }
+            }
+        }
+        if (((pa->value != NULL) && (pa->value->tag == TAG_NAME))) {
+            AstName* os_n = pa->value->data;
+            if (mp_str_eq(os_n->id, mp_str_new("os"))) {
+                MpStr* c_os = mp_str_new("");
+                if (mp_str_eq(attr, mp_str_new("exists"))) {
+                    c_os = mp_str_new("mp_file_exists");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("file_size"))) {
+                    c_os = mp_str_new("mp_file_size");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("remove"))) {
+                    c_os = mp_str_new("mp_remove");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("rename"))) {
+                    c_os = mp_str_new("mp_rename");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("mkdir"))) {
+                    c_os = mp_str_new("mp_dir_create");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("rmdir"))) {
+                    c_os = mp_str_new("mp_dir_remove");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("isdir"))) {
+                    c_os = mp_str_new("mp_dir_exists");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("getcwd"))) {
+                    c_os = mp_str_new("mp_dir_cwd");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("listdir"))) {
+                    c_os = mp_str_new("mp_dir_list");
+                } else 
+                if (mp_str_eq(attr, mp_str_new("chdir"))) {
+                    c_os = mp_str_new("mp_dir_chdir");
+                }
+                if ((mp_str_len(c_os) > 0)) {
+                    if ((arg_parts != NULL)) {
+                        free(arg_parts);
+                    }
+                    return mp_str_format("%s(%s)", c_os->data, arg_str->data);
+                }
+            }
+        }
         if (mp_str_eq(obj_type, (&(MpStr){.data=(char*)"MpStr*",.len=6}))) {
             MpStr* c_fn = mp_str_format("mp_str_%s", attr->data);
             MpStr* all_a = obj_str;

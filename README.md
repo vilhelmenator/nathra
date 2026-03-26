@@ -638,28 +638,32 @@ r.close()
 When a `str` variable is passed to `f.write()`, it calls `mp_file_write_str` automatically. String literals and `cstr` go through the raw C write path.
 
 ```python
-exists: int = file_exists("data.bin")
-size:   int = file_size("data.bin")
-remove_file("tmp.txt")
-rename_file("old.txt", "new.txt")
+import os
+
+exists: int = os.exists("data.bin")
+size:   int = os.file_size("data.bin")
+os.remove("tmp.txt")
+os.rename("old.txt", "new.txt")
 ```
 
 ### Directories and paths
 
 ```python
-dir_create("/tmp/mydir")
-dir_remove("/tmp/mydir")
-ok:  int = dir_exists("/tmp/mydir")
-cwd: str = dir_cwd()
-entries: list = dir_list(".")   # list of MpStr* names
+os.mkdir("/tmp/mydir")
+os.rmdir("/tmp/mydir")
+ok:  int = os.isdir("/tmp/mydir")
+cwd: str = os.getcwd()
+entries: list = os.listdir(".")   # list of MpStr* names
 ```
 
 ```python
-base: str = path_basename("/home/user/file.txt")   # "file.txt"
-ext:  str = path_ext("photo.jpg")                  # ".jpg"
-dir:  str = path_dirname("/home/user/file.txt")    # "/home/user"
-p:    str = path_join("/tmp", "output.c")
+base: str = os.path.basename("/home/user/file.txt")   # "file.txt"
+ext:  str = os.path.ext("photo.jpg")                  # ".jpg"
+dir:  str = os.path.dirname("/home/user/file.txt")    # "/home/user"
+p:    str = os.path.join("/tmp", "output.c")
 ```
+
+The old function names (`file_exists`, `dir_create`, `path_join`, etc.) still work.
 
 ### Serialization
 

@@ -35,6 +35,28 @@ _BUILTIN_PARAM_TYPES: dict[str, list[str]] = {
     "write_text": ["MpWriter*", "MpStr*"],
 }
 
+# os.func() aliases → same runtime functions as the existing builtins
+_OS_FUNCS: dict[str, str] = {
+    "exists": "mp_file_exists",
+    "file_size": "mp_file_size",
+    "remove": "mp_remove",
+    "rename": "mp_rename",
+    "mkdir": "mp_dir_create",
+    "rmdir": "mp_dir_remove",
+    "isdir": "mp_dir_exists",
+    "getcwd": "mp_dir_cwd",
+    "listdir": "mp_dir_list",
+    "chdir": "mp_dir_chdir",
+}
+
+# os.path.func() aliases
+_OS_PATH_FUNCS: dict[str, str] = {
+    "join": "mp_path_join",
+    "basename": "mp_path_basename",
+    "dirname": "mp_path_dirname",
+    "ext": "mp_path_ext",
+}
+
 
 class ExprMixin:
     # -------------------------------------------------------------------
@@ -953,6 +975,13 @@ class ExprMixin:
         # math.sqrt(x) etc.
         if isinstance(obj, ast.Name) and obj.id == "math" and attr in self._MATH_FUNCS:
             return f"{self._MATH_FUNCS[attr]}({arg_str})"
+        # os.path.join(x, y) etc. — two-level attribute
+        if (isinstance(obj, ast.Attribute) and isinstance(obj.value, ast.Name)
+                and obj.value.id == "os" and obj.attr == "path" and attr in _OS_PATH_FUNCS):
+            return f"{_OS_PATH_FUNCS[attr]}({arg_str})"
+        # os.exists(f) etc.
+        if isinstance(obj, ast.Name) and obj.id == "os" and attr in _OS_FUNCS:
+            return f"{_OS_FUNCS[attr]}({arg_str})"
         if isinstance(obj, ast.Name) and obj.id in self.modules:
             mi = self.modules[obj.id]
             if attr in mi.structs:
