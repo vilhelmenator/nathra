@@ -165,6 +165,32 @@ def _has_decorator(fd: ptr[AstFunctionDef], name: str) -> int:
 
 # ── Typed list scanning ─────────────────────────────────────────────────
 
+def _scan_annotation_for_list(s: ptr[CompilerState], ann: ptr[AstNode]) -> void:
+    """Check if an annotation is list[T] or own[list[T]] and register the typed list."""
+    if ann is None or ann.tag != TAG_SUBSCRIPT:
+        return
+    asub: ptr[AstSubscript] = ann.data
+    sub_val: ptr[AstNode] = asub.value
+    # Unwrap own[list[T]] → list[T]
+    if sub_val is not None and sub_val.tag == TAG_NAME:
+        bn: ptr[AstName] = sub_val.data
+        if bn.id == "own" and asub.slice is not None and asub.slice.tag == TAG_SUBSCRIPT:
+            asub = asub.slice.data
+            sub_val = asub.value
+    if sub_val is not None and sub_val.tag == TAG_NAME:
+        bn2: ptr[AstName] = sub_val.data
+        if bn2.id == "typed_list" or bn2.id == "list":
+            elem_t: str = native_map_type(asub.slice)
+            if strmap_has(addr_of(s.typed_lists), elem_t) == 0:
+                list_name: str = elem_t + "List"
+                if elem_t == "int64_t":
+                    list_name = str_new("IntList")
+                elif elem_t == "double":
+                    list_name = str_new("FloatList")
+                elif elem_t == "uint8_t":
+                    list_name = str_new("ByteList")
+                strmap_set(addr_of(s.typed_lists), elem_t, list_name)
+
 def _scan_typed_lists(s: ptr[CompilerState], body: AstNodeList) -> void:
     """Walk AST to find typed_list[T] annotations and register list types."""
     for i in range(body.count):
@@ -191,9 +217,17 @@ def _scan_typed_lists(s: ptr[CompilerState], body: AstNodeList) -> void:
                             elif elem_t == "uint8_t":
                                 list_name = str_new("ByteList")
                             strmap_set(addr_of(s.typed_lists), elem_t, list_name)
-        # Also scan inside function bodies
+        # Also scan function params, return types, and bodies
         if node.tag == TAG_FUNCTION_DEF:
             fd: ptr[AstFunctionDef] = node.data
+            # Scan parameter annotations for list[T] / own[list[T]]
+            if fd.args is not None:
+                fa: ptr[AstArguments] = fd.args.data
+                for pi in range(fa.args.count):
+                    pa: ptr[AstArg] = fa.args.items[pi].data
+                    _scan_annotation_for_list(s, pa.annotation)
+            # Scan return type
+            _scan_annotation_for_list(s, fd.returns)
             _scan_typed_lists(s, fd.body)
         if node.tag == TAG_CLASS_DEF:
             cd: ptr[AstClassDef] = node.data
@@ -407,6 +441,13 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
         if _is_extern_func(fd):
             continue
         ret: str = native_map_type(fd.returns)
+        if str_starts_with(ret, str_new("__own__ ")):
+            ret = str_slice(ret, 8, str_len(ret))
+        if ret == "__typed_list__":
+            tl_ret_e: str = native_get_typed_list_elem(fd.returns)
+            tl_ret_n: str = strmap_get(addr_of(s.typed_lists), tl_ret_e)
+            if tl_ret_n is not None:
+                ret = tl_ret_n + "*"
         if fd.name == "main":
             ret = str_new("int")
         # Build arg string
@@ -415,6 +456,19 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
         for j in range(args_node.args.count):
             arg: ptr[AstArg] = args_node.args.items[j].data
             atype: str = native_map_type(arg.annotation)
+            # Strip own[T] prefix
+            p_ann: ptr[AstNode] = arg.annotation
+            if str_starts_with(atype, str_new("__own__ ")):
+                atype = str_slice(atype, 8, str_len(atype))
+                if p_ann is not None and p_ann.tag == TAG_SUBSCRIPT:
+                    own_s: ptr[AstSubscript] = p_ann.data
+                    p_ann = own_s.slice
+            # Resolve typed_list[T] → TypedListName*
+            if atype == "__typed_list__":
+                tl_elem: str = native_get_typed_list_elem(p_ann)
+                tl_name: str = strmap_get(addr_of(s.typed_lists), tl_elem)
+                if tl_name is not None:
+                    atype = tl_name + "*"
             if j > 0:
                 arg_str = arg_str + ", "
             arg_str = str_concat(arg_str, str_format("%s %s", atype.data, arg.name.data))
@@ -446,6 +500,13 @@ def _compile_one_func(s: ptr[CompilerState], fd: ptr[AstFunctionDef], prefix: st
     if _is_extern_func(fd):
         return
     ret: str = native_map_type(fd.returns)
+    if str_starts_with(ret, str_new("__own__ ")):
+        ret = str_slice(ret, 8, str_len(ret))
+    if ret == "__typed_list__":
+        tl_ret_e2: str = native_get_typed_list_elem(fd.returns)
+        tl_ret_n2: str = strmap_get(addr_of(s.typed_lists), tl_ret_e2)
+        if tl_ret_n2 is not None:
+            ret = tl_ret_n2 + "*"
     args_node: ptr[AstArguments] = fd.args.data
     arg_str: str = str_new("")
     # Clear local vars for this function
@@ -462,6 +523,18 @@ def _compile_one_func(s: ptr[CompilerState], fd: ptr[AstFunctionDef], prefix: st
         arg: ptr[AstArg] = args_node.args.items[j].data
         # Self parameter in struct methods gets pointer-to-struct type
         atype: str = native_map_type(arg.annotation)
+        d_ann: ptr[AstNode] = arg.annotation
+        if str_starts_with(atype, str_new("__own__ ")):
+            atype = str_slice(atype, 8, str_len(atype))
+            if d_ann is not None and d_ann.tag == TAG_SUBSCRIPT:
+                own_s2: ptr[AstSubscript] = d_ann.data
+                d_ann = own_s2.slice
+        # Resolve typed_list[T] → TypedListName*
+        if atype == "__typed_list__":
+            tl_elem2: str = native_get_typed_list_elem(d_ann)
+            tl_name2: str = strmap_get(addr_of(s.typed_lists), tl_elem2)
+            if tl_name2 is not None:
+                atype = tl_name2 + "*"
         if arg.name == "self" and str_len(prefix) > 0:
             struct_name: str = str_slice(prefix, 0, str_len(prefix) - 1)
             atype = struct_name + "*"

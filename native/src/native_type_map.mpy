@@ -190,6 +190,10 @@ def native_map_type(node: ptr[AstNode]) -> str:
                 inner6: str = native_map_type(p4.slice)
                 return "__backref__ " + inner6
 
+            if name == "own":
+                inner_own: str = native_map_type(p4.slice)
+                return "__own__ " + inner_own
+
             if name == "Result":
                 inner7: str = native_map_type(p4.slice)
                 mangled: str = mangle_type(inner7)

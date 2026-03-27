@@ -301,6 +301,31 @@ def _infer_cleanup(open_func: str) -> str:
 
 def native_compile_with(s: ptr[CompilerState], node: ptr[AstNode]) -> void:
     p: ptr[AstWith] = node.data
+
+    # with scope(arena, size): → arena = arena_new(size); body; arena_free(arena);
+    if p.items.count == 1:
+        item0: ptr[AstWithItem] = p.items.items[0].data
+        ctx0: ptr[AstNode] = item0.context_expr
+        if ctx0 is not None and ctx0.tag == TAG_CALL:
+            sc: ptr[AstCall] = ctx0.data
+            if sc.func is not None and sc.func.tag == TAG_NAME:
+                scn: ptr[AstName] = sc.func.data
+                if scn.id == "scope" and sc.args.count >= 2:
+                    arena_arg: ptr[AstNode] = sc.args.items[0]
+                    if arena_arg.tag == TAG_NAME:
+                        arena_n: ptr[AstName] = arena_arg.data
+                        size_expr: str = native_compile_expr(s, sc.args.items[1])
+                        _emit(s, str_new("{"))
+                        s.indent = s.indent + 1
+                        _emit(s, str_format("MpArena* %s = mp_arena_new(%s);", arena_n.id.data, size_expr.data))
+                        strmap_set(addr_of(s.local_vars), arena_n.id, str_new("MpArena*"))
+                        for si in range(p.body.count):
+                            native_compile_stmt(s, p.body.items[si])
+                        _emit(s, str_format("mp_arena_free(%s);", arena_n.id.data))
+                        s.indent = s.indent - 1
+                        _emit(s, str_new("}"))
+                        return
+
     cleanup_fns: ptr[str] = alloc(16 * 8)
     var_names: ptr[str] = alloc(16 * 8)
     item_count: i32 = p.items.count
@@ -380,6 +405,14 @@ def native_compile_ann_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
         return
     vn: ptr[AstName] = p.target.data
     ctype: str = native_map_type(p.annotation)
+    ann_node: ptr[AstNode] = p.annotation
+
+    # own[T] — strip prefix, unwrap annotation for inner type resolution
+    if str_starts_with(ctype, str_new("__own__ ")):
+        ctype = str_slice(ctype, 8, str_len(ctype))
+        if ann_node is not None and ann_node.tag == TAG_SUBSCRIPT:
+            own_sub: ptr[AstSubscript] = ann_node.data
+            ann_node = own_sub.slice
 
     # Handle special type sentinels
     if ctype == "__array__":
@@ -417,8 +450,8 @@ def native_compile_ann_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
     if ctype == "__typed_list__":
         # Get elem type from annotation
         elem_t: str = str_new("int64_t")
-        if p.annotation is not None and p.annotation.tag == TAG_SUBSCRIPT:
-            ann_sub2: ptr[AstSubscript] = p.annotation.data
+        if ann_node is not None and ann_node.tag == TAG_SUBSCRIPT:
+            ann_sub2: ptr[AstSubscript] = ann_node.data
             elem_t = native_map_type(ann_sub2.slice)
         # Look up list name from typed_lists map
         list_name: str = strmap_get(addr_of(s.typed_lists), elem_t)
@@ -460,8 +493,8 @@ def native_compile_ann_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void
         return
 
     # Dict[K, V] — track types and handle dict literals
-    if ctype == "MpDict*" and p.annotation is not None and p.annotation.tag == TAG_SUBSCRIPT:
-        ann_d: ptr[AstSubscript] = p.annotation.data
+    if ctype == "MpDict*" and ann_node is not None and ann_node.tag == TAG_SUBSCRIPT:
+        ann_d: ptr[AstSubscript] = ann_node.data
         d_base: ptr[AstNode] = ann_d.value
         if d_base is not None and d_base.tag == TAG_NAME:
             d_bn: ptr[AstName] = d_base.data

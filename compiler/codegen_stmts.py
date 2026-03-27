@@ -709,6 +709,9 @@ class StmtMixin:
 
         for arg in node.args.args:
             atype = map_type(arg.annotation)
+            _is_own = atype.startswith("__own__ ")
+            if _is_own:
+                atype = atype[8:]
             if atype == "__funcptr__":
                 info = get_funcptr_info(arg.annotation)
                 # Resolve funcptr type aliases (e.g., SupportFunc = func[...])
@@ -724,7 +727,12 @@ class StmtMixin:
                     continue
             # Resolve typed_list[T] to actual TypedList* type
             if atype == "__typed_list__":
-                elem_t = get_typed_list_elem(arg.annotation)
+                _ann = arg.annotation
+                if (_is_own and isinstance(_ann, ast.Subscript)
+                        and isinstance(_ann.value, ast.Name)
+                        and _ann.value.id == "own"):
+                    _ann = _ann.slice
+                elem_t = get_typed_list_elem(_ann)
                 list_name = self.typed_lists.get(elem_t, "MpList")
                 atype = f"{list_name}*"
                 self._list_vars[arg.arg] = elem_t
@@ -735,6 +743,7 @@ class StmtMixin:
             _MUTABLE_RT_TYPES = ("MpReader*", "MpWriter*", "MpArena*", "CompilerState*")
             const_prefix = ""
             if (atype.endswith("*")
+                    and not _is_own
                     and not atype.startswith("const ")
                     and atype != "void*"
                     and atype not in _MUTABLE_RT_TYPES
@@ -1163,6 +1172,16 @@ class StmtMixin:
         name = self.compile_expr(node.target)
         annotation = node.annotation
         ctype = map_type(annotation)
+
+        # own[T] — strip ownership prefix; codegen uses the inner type,
+        # ownership tracking is handled by _own_analyze in the analysis pass.
+        if ctype.startswith("__own__ "):
+            ctype = ctype[8:]
+            # Unwrap annotation: own[list[int]] → list[int] for typed list resolution
+            if (isinstance(annotation, ast.Subscript)
+                    and isinstance(annotation.value, ast.Name)
+                    and annotation.value.id == "own"):
+                annotation = annotation.slice
 
         if ctype == "__funcptr__":
             info = get_funcptr_info(annotation)
@@ -1878,6 +1897,25 @@ class StmtMixin:
         for item in node.items:
             ctx = item.context_expr
             var = item.optional_vars
+
+            # with scope(arena_name, size): → arena_name = arena_new(size); body; arena_free(arena_name);
+            if (isinstance(ctx, ast.Call)
+                    and isinstance(ctx.func, ast.Name)
+                    and ctx.func.id == "scope"
+                    and len(ctx.args) >= 2
+                    and isinstance(ctx.args[0], ast.Name)):
+                arena_name = ctx.args[0].id
+                size_expr = self.compile_expr(ctx.args[1])
+                self.emit("{")
+                self.indent += 1
+                self.emit(f"MpArena* {arena_name} = mp_arena_new({size_expr});")
+                self.local_vars[arena_name] = "MpArena*"
+                for stmt in node.body:
+                    self.compile_stmt(stmt)
+                self.emit(f"mp_arena_free({arena_name});")
+                self.indent -= 1
+                self.emit("}")
+                return
 
             enter_expr = self.compile_expr(ctx)
 

@@ -578,6 +578,15 @@ class ExprMixin:
             if fname == "test_assert_eq":
                 return f"mp_test_assert_eq({arg_str})"
 
+            # heap_assert(expected) / heap_assert_delta(snap, delta)
+            if fname == "heap_assert" and len(node.args) == 1:
+                val = self.compile_expr(node.args[0])
+                return f'mp_heap_assert({val}, __FILE__, __LINE__)'
+            if fname == "heap_assert_delta" and len(node.args) == 2:
+                snap = self.compile_expr(node.args[0])
+                delta = self.compile_expr(node.args[1])
+                return f'mp_heap_assert_delta({snap}, {delta}, __FILE__, __LINE__)'
+
             # sizeof with type name mapping
             if fname == "sizeof" and len(node.args) == 1:
                 return self._call_sizeof(node)
@@ -716,6 +725,7 @@ class ExprMixin:
                 "pool_new": "mp_pool_new", "pool_submit": "mp_pool_submit",
                 "pool_shutdown": "mp_pool_shutdown",
                 "parallel_for": "mp_parallel_for",
+                "heap_allocated": "mp_heap_allocated",
                 "rand_seed": "mp_rand_seed", "rand_int": "mp_rand_int",
                 "rand_float": "mp_rand_float",
                 "time_now": "mp_time_now", "time_ms": "mp_time_ms",

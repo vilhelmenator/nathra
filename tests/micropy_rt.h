@@ -88,6 +88,85 @@ static inline void _mp_alloc_assert_zero(void) {
 #  define _mp_alloc_assert_zero() ((void)0)
 #endif
 
+/* -------------------------------------------------------------------------
+ * Heap memory assertions — active under MP_SAFE or MP_TRACK_ALLOC.
+ *
+ * Wraps malloc/free with a size header to track total live bytes.
+ * Provides heap_allocated(), heap_assert(), heap_assert_delta() for
+ * verifying that code paths don't leak.
+ *
+ * In release builds everything compiles to no-ops / direct malloc/free.
+ * ------------------------------------------------------------------------- */
+#if defined(MP_SAFE) || defined(MP_TRACK_ALLOC)
+static int64_t _mp_heap_bytes = 0;
+
+static inline void* _mp_tracked_alloc(size_t n) {
+    size_t* blk = (size_t*)malloc(sizeof(size_t) + n);
+    if (!blk) return NULL;
+    blk[0] = n;
+    _mp_heap_bytes += (int64_t)n;
+    return (void*)(blk + 1);
+}
+
+static inline void _mp_tracked_free(void* p) {
+    if (!p) return;
+    size_t* blk = ((size_t*)p) - 1;
+    _mp_heap_bytes -= (int64_t)blk[0];
+    free(blk);
+}
+
+static inline void* _mp_tracked_realloc(void* p, size_t new_n) {
+    size_t old_n = 0;
+    size_t* old_blk = NULL;
+    if (p) {
+        old_blk = ((size_t*)p) - 1;
+        old_n = old_blk[0];
+    }
+    size_t* blk = (size_t*)realloc(old_blk, sizeof(size_t) + new_n);
+    if (!blk) return NULL;
+    _mp_heap_bytes += (int64_t)new_n - (int64_t)old_n;
+    blk[0] = new_n;
+    return (void*)(blk + 1);
+}
+
+static inline int64_t mp_heap_allocated(void) { return _mp_heap_bytes; }
+
+__attribute__((cold, noreturn))
+static void _mp_heap_assert_fail(int64_t expected, int64_t actual,
+                                  const char* file, int line) {
+    fprintf(stderr, "%s:%d: heap assertion failed: expected %lld bytes, found %lld\n",
+            file, line, (long long)expected, (long long)actual);
+    abort();
+}
+
+static inline void mp_heap_assert(int64_t expected, const char* file, int line) {
+    if (_mp_heap_bytes != expected)
+        _mp_heap_assert_fail(expected, _mp_heap_bytes, file, line);
+}
+
+static inline void mp_heap_assert_delta(int64_t snap, int64_t expected_delta,
+                                         const char* file, int line) {
+    int64_t actual_delta = _mp_heap_bytes - snap;
+    if (actual_delta != expected_delta)
+        _mp_heap_assert_fail(expected_delta, actual_delta, file, line);
+}
+
+/* Redefine allocators to use tracked versions.
+ * If MICROPY_DEBUG is also active, debug wrappers call the real malloc/free
+ * which are already overridden above, so we layer tracking ON TOP of debug. */
+#ifndef MICROPY_DEBUG
+#  define malloc(n)      _mp_tracked_alloc(n)
+#  define free(p)        _mp_tracked_free(p)
+#  define realloc(p, n)  _mp_tracked_realloc((p), (n))
+#endif
+
+#else
+/* Release builds — no tracking overhead */
+static inline int64_t mp_heap_allocated(void) { return 0; }
+#define mp_heap_assert(expected, file, line) ((void)0)
+#define mp_heap_assert_delta(snap, delta, file, line) ((void)0)
+#endif
+
 static inline MpVal mp_val_int(int64_t v) { MpVal r; memcpy(&r, &v, 8); return r; }
 static inline MpVal mp_val_float(double v) { MpVal r; memcpy(&r, &v, 8); return r; }
 static inline int64_t mp_as_int(MpVal v) { int64_t r; memcpy(&r, &v, 8); return r; }

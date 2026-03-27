@@ -111,6 +111,9 @@ def map_type(annotation, type_map=None) -> str:
             if base.id == "backref":
                 inner = map_type(annotation.slice, type_map)
                 return f"__backref__ {inner}"
+            if base.id == "own":
+                inner = map_type(annotation.slice, type_map)
+                return f"__own__ {inner}"
             if base.id == "Result":
                 inner = map_type(annotation.slice, type_map)
                 return f"Result_{mangle_type(inner)}"

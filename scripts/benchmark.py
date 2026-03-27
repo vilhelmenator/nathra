@@ -8,6 +8,7 @@ Usage:
 import ast
 import ctypes
 import glob
+import io
 import os
 import sys
 import time
@@ -52,10 +53,13 @@ def main():
         src = open(f).read()
         total_lines += src.count("\n") + 1
 
-        # Python compiler
+        # Python compiler (suppress DCE info messages)
         t0 = time.perf_counter()
+        _old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
         c = Compiler(source_dir=SRC_DIR, emit_line_directives=False)
         c.compile_file(f, name.replace(".mpy", ""))
+        sys.stderr = _old_stderr
         t1 = time.perf_counter()
         py_ms = (t1 - t0) * 1000
 

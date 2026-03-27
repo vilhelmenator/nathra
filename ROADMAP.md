@@ -1082,3 +1082,210 @@ applies to any micropy project with hot call loops.
   fields in match arms.
 - **Package manager / dependency resolution.** `import` across project
   boundaries with versioned modules.
+
+## Ownership tracking (`own[T]`)
+
+Lightweight move semantics without a full borrow checker. `own[T]` marks a
+parameter or variable as owning its heap allocation — the compiler tracks
+liveness and enforces that owned values are freed or transferred, and that
+moved values are not used after the move.
+
+### Semantics
+
+```python
+def process(data: own[list[int]]) -> void:
+    defer(list_free(data))
+    # data must be freed or moved before return
+    for x in data:
+        print(x)
+
+def main() -> void:
+    nums: list[int] = list_new()
+    nums.append(10)
+    process(nums)        # nums is moved — ownership transfers to process
+    print(len(nums))     # ERROR: use of moved value 'nums'
+```
+
+Passing a value to an `own[T]` parameter is a move. The variable becomes
+dead at the callsite. This is a single-bit alive/dead state per variable,
+propagated through control flow — same infrastructure as the null analysis
+lattice.
+
+### Rules
+
+| Action | Effect |
+|--------|--------|
+| Pass to `own[T]` parameter | Move: source becomes dead |
+| Assign to `own[T]` variable | Move: RHS becomes dead |
+| Return `own[T]` | Transfer: caller receives ownership |
+| Function exit without free/move | **Compile error**: owned value not freed |
+| Use after move | **Compile error**: use of moved value |
+
+### Non-owning parameters
+
+Plain `ptr[T]`, `list[T]`, `str` parameters remain borrowed — no ownership
+transfer, no move, caller retains responsibility. This is backwards-compatible:
+existing code doesn't change. `own[T]` is opt-in for functions that want to
+express "I take this and I'm responsible for it."
+
+### Interaction with defer
+
+`own[T]` + `defer` is the common pattern:
+
+```python
+def load_and_process(path: str) -> own[list[int]]:
+    data: own[list[int]] = load_data(path)
+    # if we return data, ownership transfers to caller — no leak
+    # if we return early via error, defer handles cleanup
+    defer(list_free(data))
+    transform(data)
+    return data   # defer is skipped for the returned value
+```
+
+The compiler detects that a `defer(free(x))` on an `own[T]` value should
+be skipped when `x` is the return value — it's being transferred, not
+abandoned.
+
+### Implementation
+
+Runs as a dataflow pass alongside null analysis. Track a per-variable state
+of `{alive, moved, freed}`. At each use-site, check the state. At function
+exit, verify all `own[T]` locals are in `moved` or `freed` state. Compile
+errors for violations — always on, no flag needed.
+
+---
+
+## Scoped arenas (`with scope`)
+
+Arena-scoped allocation with automatic cleanup at scope exit. Two modes:
+explicit (name the arena) and implicit (allocations inside the scope use
+the arena automatically).
+
+### Explicit mode
+
+```python
+with scope(arena, 65536):
+    s: str = arena_str_new(arena, "temp")
+    lst: list = arena_list_new(arena)
+    buf: ptr[byte] = arena_alloc(arena, 1024)
+    # use freely — no individual frees needed
+# arena freed here automatically
+```
+
+This is sugar for the existing pattern:
+
+```python
+arena: MpArena = arena_new(65536)
+defer(arena_free(arena))
+```
+
+But scoped, so the arena's lifetime is visually bounded and the compiler
+can verify that no arena-allocated pointer escapes the scope.
+
+### Implicit mode (later)
+
+```python
+with scope(65536):
+    s: str = "temp"             # allocated from scope arena
+    lst: list[int] = [1, 2, 3] # allocated from scope arena
+    result: str = s.upper()     # allocated from scope arena
+# all freed
+```
+
+The compiler rewrites `str_new`, `list_new`, etc. inside the `with` block
+to their `arena_*` equivalents. This requires tracking a "current arena"
+in the compiler state and threading it through all allocation codegen.
+
+### Escape analysis
+
+A pointer allocated from a scoped arena must not outlive the scope:
+
+```python
+leaked: ptr[str] = None
+with scope(arena, 65536):
+    s: str = arena_str_new(arena, "temp")
+    leaked = s   # ERROR: arena-allocated value escapes scope
+# arena freed — leaked would be dangling
+```
+
+The compiler flags assignments from arena-scoped variables to outer-scope
+variables as compile errors. This reuses the existing escape analysis pass.
+
+---
+
+## Heap memory assertions
+
+In-process allocation tracking for tests and debugging. A counting allocator
+wraps `malloc`/`free` under `--safe` or `--track-alloc` and provides
+assertion primitives.
+
+### API
+
+```python
+# Snapshot current heap state
+snap: int = heap_allocated()
+
+# Assert that allocated bytes match a value
+heap_assert(0)              # nothing on the heap
+heap_assert(snap)           # back to where we were
+
+# Assert net change since snapshot
+heap_assert_delta(snap, 0)  # zero net allocations since snap
+heap_assert_delta(snap, 64) # exactly 64 bytes net allocated since snap
+```
+
+### Usage in tests
+
+```python
+@test
+def test_list_cleanup() -> void:
+    snap: int = heap_allocated()
+
+    nums: list[int] = list_new()
+    nums.append(10)
+    nums.append(20)
+    nums.append(30)
+    list_free(nums)
+
+    heap_assert(snap)   # all memory returned — test passes
+
+@test
+def test_string_ops_no_leak() -> void:
+    snap: int = heap_allocated()
+
+    s: str = "hello"
+    t: str = s + " world"
+    u: str = t.upper()
+    str_free(u)
+    str_free(t)
+    str_free(s)
+
+    heap_assert(snap)   # clean
+```
+
+### Usage in production code
+
+```python
+def process_batch(items: ptr[Item], count: i32) -> void:
+    snap: int = heap_allocated()
+
+    for i in range(count):
+        process_one(items[i])
+
+    heap_assert(snap)   # verify batch processing doesn't leak
+```
+
+### Implementation
+
+The runtime maintains a global `int64_t mp_heap_bytes` counter. Under
+`--safe` or `--track-alloc`, `mp_alloc(n)` adds `n`, `mp_free(p)` subtracts
+the allocation size (stored in a small header before the returned pointer,
+same pattern as `mimalloc` and `jemalloc`). In release builds the counter
+and header are compiled out — zero overhead.
+
+`heap_assert` and `heap_assert_delta` compare against the counter and call
+a cold abort handler with file/line on mismatch:
+
+```
+sma_study.mpy:47: heap assertion failed: expected 0 bytes allocated, found 128
+```

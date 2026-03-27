@@ -389,6 +389,177 @@ class Compiler(StmtMixin, ExprMixin):
             return a
         return "unknown"
 
+    # ── Ownership tracking (own[T]) ────────────────────────────────────
+
+    def _own_analyze(self, func_node: ast.FunctionDef, filepath: str) -> None:
+        """Check ownership rules for own[T] variables.
+
+        Tracks alive/moved/freed states through the function body.
+        Errors: use-after-move, owned value not freed/moved at function exit.
+        """
+        # Collect own[T] variables from params and local annotations
+        own_vars: dict[str, str] = {}  # varname → inner C type
+
+        for arg in func_node.args.args:
+            if arg.annotation:
+                ctype = map_type(arg.annotation)
+                if ctype.startswith("__own__ "):
+                    own_vars[arg.arg] = ctype[8:]  # strip __own__ prefix
+
+        for node in ast.walk(func_node):
+            if (isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.annotation):
+                ctype = map_type(node.annotation)
+                if ctype.startswith("__own__ "):
+                    own_vars[node.target.id] = ctype[8:]
+
+        if not own_vars:
+            return
+
+        # State per variable: "alive", "moved", "freed"
+        states: dict[str, str] = {v: "alive" for v in own_vars}
+
+        # Walk statements in order (top-level only for now)
+        def check_use(vname: str, lineno: int) -> None:
+            st = states.get(vname)
+            if st == "moved":
+                print(
+                    f"{filepath}:{lineno}: error: use of moved value '{vname}'",
+                    file=sys.stderr,
+                )
+                raise CompileError(f"use of moved value '{vname}'")
+            if st == "freed":
+                print(
+                    f"{filepath}:{lineno}: error: use of freed value '{vname}'",
+                    file=sys.stderr,
+                )
+                raise CompileError(f"use of freed value '{vname}'")
+
+        def walk_stmts(stmts: list) -> None:
+            for stmt in stmts:
+                lineno = getattr(stmt, 'lineno', 0)
+
+                # Free call: free(x), list_free(x), str_free(x), dict_free(x)
+                if (isinstance(stmt, ast.Expr)
+                        and isinstance(stmt.value, ast.Call)
+                        and isinstance(stmt.value.func, ast.Name)
+                        and stmt.value.func.id in _FREE_FUNCS
+                        and len(stmt.value.args) == 1
+                        and isinstance(stmt.value.args[0], ast.Name)
+                        and stmt.value.args[0].id in own_vars):
+                    vname = stmt.value.args[0].id
+                    check_use(vname, lineno)
+                    states[vname] = "freed"
+                    continue
+
+                # Assignment to own[T] param from another own variable = move
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    if (isinstance(stmt.value, ast.Name)
+                            and stmt.value.id in own_vars):
+                        check_use(stmt.value.id, lineno)
+                        states[stmt.value.id] = "moved"
+
+                # Call with own[T] arg passed to own[T] param = move
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    call = stmt.value
+                    if isinstance(call.func, ast.Name):
+                        ptypes = self.func_param_types.get(call.func.id)
+                        # Also check module-prefixed name
+                        if ptypes is None:
+                            for key in self.func_param_types:
+                                if key.endswith(f"_{call.func.id}"):
+                                    ptypes = self.func_param_types[key]
+                                    break
+                        if ptypes:
+                            for i, arg in enumerate(call.args):
+                                if (isinstance(arg, ast.Name)
+                                        and arg.id in own_vars
+                                        and i < len(ptypes)
+                                        and ptypes[i].startswith("__own__ ")):
+                                    check_use(arg.id, lineno)
+                                    states[arg.id] = "moved"
+
+                # Return of own[T] value = transfer (OK, not a leak)
+                if isinstance(stmt, ast.Return) and stmt.value:
+                    if (isinstance(stmt.value, ast.Name)
+                            and stmt.value.id in own_vars):
+                        check_use(stmt.value.id, lineno)
+                        states[stmt.value.id] = "moved"
+
+                # Check any use of own[T] vars in expressions
+                # Build set of var names that are being moved in this statement
+                _moving_vars: set = set()
+                if (isinstance(stmt, ast.Expr)
+                        and isinstance(stmt.value, ast.Call)
+                        and isinstance(stmt.value.func, ast.Name)):
+                    _call = stmt.value
+                    _pt = self.func_param_types.get(_call.func.id)
+                    if _pt is None:
+                        for _k in self.func_param_types:
+                            if _k.endswith(f"_{_call.func.id}"):
+                                _pt = self.func_param_types[_k]
+                                break
+                    if _pt:
+                        for _ci, _ca in enumerate(_call.args):
+                            if (isinstance(_ca, ast.Name)
+                                    and _ca.id in own_vars
+                                    and _ci < len(_pt)
+                                    and _pt[_ci].startswith("__own__ ")):
+                                _moving_vars.add(_ca.id)
+
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Name) and node.id in own_vars:
+                        # Skip the assignment target itself
+                        if isinstance(stmt, (ast.AnnAssign, ast.Assign)):
+                            continue
+                        # Skip free calls (already handled above)
+                        if (isinstance(stmt, ast.Expr)
+                                and isinstance(stmt.value, ast.Call)
+                                and isinstance(stmt.value.func, ast.Name)
+                                and stmt.value.func.id in _FREE_FUNCS):
+                            continue
+                        # Skip vars being moved in this call (the move itself is OK)
+                        if node.id in _moving_vars:
+                            continue
+                        check_use(node.id, getattr(node, 'lineno', lineno))
+
+                # Recurse into if/else, while, for bodies
+                if isinstance(stmt, ast.If):
+                    saved = dict(states)
+                    walk_stmts(stmt.body)
+                    if_states = dict(states)
+                    states.update(saved)
+                    walk_stmts(stmt.orelse)
+                    else_states = dict(states)
+                    # Join: if either branch moved/freed, result is that state
+                    for v in own_vars:
+                        if if_states.get(v) != else_states.get(v):
+                            # Divergent — pick the "worst" state
+                            s1, s2 = if_states.get(v, "alive"), else_states.get(v, "alive")
+                            if "moved" in (s1, s2) or "freed" in (s1, s2):
+                                states[v] = s1 if s1 != "alive" else s2
+                        else:
+                            states[v] = if_states.get(v, "alive")
+                elif isinstance(stmt, (ast.While, ast.For)):
+                    walk_stmts(stmt.body)
+
+        walk_stmts(func_node.body)
+
+        # At function exit: all own[T] vars must be freed or moved
+        for vname in own_vars:
+            st = states[vname]
+            if st == "alive":
+                lineno = func_node.end_lineno or func_node.lineno
+                print(
+                    f"{filepath}:{lineno}: error: owned value '{vname}' not "
+                    f"freed or transferred at end of function '{func_node.name}'",
+                    file=sys.stderr,
+                )
+                raise CompileError(
+                    f"owned value '{vname}' not freed or transferred"
+                )
+
     # ── Weighted call graph for function layout ─────────────────────────
 
     def _build_weighted_call_graph(self, funcs: list) -> dict:
@@ -1613,6 +1784,12 @@ class Compiler(StmtMixin, ExprMixin):
         # Static leak detection — warns to stderr, no effect on codegen
         self._check_leaks(tree, self._current_file or filepath)
 
+        # Ownership analysis — compile errors for own[T] violations
+        _own_fp = self._current_file or filepath
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef):
+                self._own_analyze(node, _own_fp)
+
         # ---- Process imports ----
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.Import):
@@ -2594,10 +2771,16 @@ class Compiler(StmtMixin, ExprMixin):
         nice = {"int64_t": "Int", "double": "Float", "uint8_t": "Byte", "int": "Bool"}
         for node in ast.walk(tree):
             if isinstance(node, ast.AnnAssign) and node.annotation is not None:
-                if isinstance(node.annotation, ast.Subscript):
-                    base = node.annotation.value
+                ann = node.annotation
+                # Unwrap own[list[T]] → list[T]
+                if (isinstance(ann, ast.Subscript)
+                        and isinstance(ann.value, ast.Name)
+                        and ann.value.id == "own"):
+                    ann = ann.slice
+                if isinstance(ann, ast.Subscript):
+                    base = ann.value
                     if isinstance(base, ast.Name) and base.id in ("typed_list", "list"):
-                        elem_t = get_typed_list_elem(node.annotation)
+                        elem_t = get_typed_list_elem(ann)
                         if elem_t not in self.typed_lists:
                             prefix = nice.get(elem_t, elem_t.replace("*", "Ptr"))
                             self.typed_lists[elem_t] = f"{prefix}List"
@@ -3142,9 +3325,14 @@ class Compiler(StmtMixin, ExprMixin):
             _rt_elem = get_typed_list_elem(node.returns)
             _rt_name = self.typed_lists.get(_rt_elem, "MpList")
             ret_type = f"{_rt_name}*"
+        if ret_type.startswith("__own__ "):
+            ret_type = ret_type[8:]
         args = []
         for arg in node.args.args:
             atype = map_type(arg.annotation)
+            _is_own = atype.startswith("__own__ ")
+            if _is_own:
+                atype = atype[8:]
             if atype == "__funcptr__":
                 info = _gfp(arg.annotation)
                 # If annotation is a Name alias, resolve via funcptr_alias_infos
@@ -3157,12 +3345,19 @@ class Compiler(StmtMixin, ExprMixin):
                     continue
             # Resolve typed_list[T] to TypedList*
             if atype == "__typed_list__":
-                elem_t = get_typed_list_elem(arg.annotation)
+                _ann = arg.annotation
+                # Unwrap own[list[T]] → list[T]
+                if (_is_own and isinstance(_ann, ast.Subscript)
+                        and isinstance(_ann.value, ast.Name)
+                        and _ann.value.id == "own"):
+                    _ann = _ann.slice
+                elem_t = get_typed_list_elem(_ann)
                 list_name = self.typed_lists.get(elem_t, "MpList")
                 atype = f"{list_name}*"
             _MUTABLE_RT = ("MpReader*", "MpWriter*", "MpArena*", "CompilerState*")
             const_prefix = ""
             if (atype.endswith("*")
+                    and not _is_own
                     and not atype.startswith("const ")
                     and atype != "void*"
                     and atype not in _MUTABLE_RT

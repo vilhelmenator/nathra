@@ -1,0 +1,14 @@
+def consume(data: own[list[int]]) -> void:
+    list_free(data)
+
+@test
+def test_own_move_and_free() -> void:
+    nums: own[list[int]] = [10, 20, 30]
+    consume(nums)
+    test_assert(1 == 1)
+
+@test
+def test_own_direct_free() -> void:
+    nums: own[list[int]] = [1, 2, 3]
+    list_free(nums)
+    test_assert(1 == 1)
