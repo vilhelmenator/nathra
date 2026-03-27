@@ -1,7 +1,7 @@
-# Writing Sierra Chart Studies with Micropy
+# Writing Sierra Chart Studies with Nathra
 
 Write your indicator logic in Python syntax, compile to a Sierra Chart ACSIL
-DLL. Micropy handles the C codegen; a small hook file handles the Sierra
+DLL. Nathra handles the C codegen; a small hook file handles the Sierra
 boilerplate.
 
 ## Setup

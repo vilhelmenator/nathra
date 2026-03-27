@@ -1,4 +1,4 @@
-# Micropy Compiler Roadmap
+# Nathra Compiler Roadmap
 
 > Ordered within each section by **impact ÷ work** — highest ROI first.
 
@@ -6,7 +6,7 @@
 
 ## Correctness Pass
 
-MicroPy compiles the whole program — every function body is an AST. That's the
+Nathra compiles the whole program — every function body is an AST. That's the
 structural advantage. The two foundational primitives unlock everything below them.
 The correctness pass costs nothing at runtime; all of it is compile-time analysis.
 
@@ -43,7 +43,7 @@ The correctness pass costs nothing at runtime; all of it is compile-time analysi
 - [x] **Error-path auto-free**
   When a `raise` is emitted and there are live unfreed local-only allocations,
   emit `free` calls in reverse allocation order before the raise. This is the bug
-  Rust's drop glue prevents; MicroPy does it as a codegen pass with no language
+  Rust's drop glue prevents; Nathra does it as a codegen pass with no language
   changes.
 
 - [x] **Debug-mode allocation tracking** *(`--debug` flag)*
@@ -180,7 +180,7 @@ Items marked ✅ are already implemented.
 - [x] **Stack variable lifetime narrowing**
   Track first and last statement index for each large local. If it is never
   address-taken and its lifetime doesn't overlap another large local, wrap it in a
-  `{ }` scope so the C compiler knows the stack slot can be reused. MicroPy knows
+  `{ }` scope so the C compiler knows the stack slot can be reused. Nathra knows
   whether `&var` is ever taken; C compilers must conservatively assume it might be.
 
 - [x] **Linked-list / tree traversal prefetch**
@@ -268,13 +268,13 @@ Items marked ✅ are already implemented.
   emit as a C ternary `x = cond ? a : b` with a compiler hint, or as
   `x = cond * a + (!cond) * b` for integer types. The C compiler sometimes converts
   `if/else` to `cmov`, but bails when it can't prove both arms are side-effect-free.
-  MicroPy knows this from the AST — the purity check is a leaf-node type test.
+  Nathra knows this from the AST — the purity check is a leaf-node type test.
 
 - [x] **Loop trip-count hints for known bounds**
   When `for i in range(N)` has N known at compile time or traceable to a constant
   call-site argument, emit `#pragma GCC unroll N` (for small N) or
   `__builtin_expect(n, N)` on the loop bound. The C compiler must analyze this
-  conservatively; MicroPy can just tell it.
+  conservatively; Nathra can just tell it.
 
 ### Requires call-graph or cross-function view
 
@@ -285,7 +285,7 @@ Items marked ✅ are already implemented.
   with a variable — a matrix multiply with a constant stride, a tree traversal with
   a constant depth limit, a filter with a constant flag. The biggest wins come from
   *larger* functions where constant propagation eliminates branches and unlocks
-  vectorization, so no size cap on the callee. MicroPy sees both the call site and the
+  vectorization, so no size cap on the callee. Nathra sees both the call site and the
   callee body; LTO sometimes does this, but only for trivial inlining candidates.
 
   **Specialization threshold:** specialize freely when ≤ 3 distinct constant values
@@ -600,7 +600,7 @@ uses existing decorator and import mechanisms.
 | 5 | Two functions in one file with different hooks — verify both wrapped correctly |
 
 
-# MicroPy Roadmap
+# Nathra Roadmap
 
 ## Recent milestones
 
@@ -1066,7 +1066,7 @@ The I-cache benefit is most visible in the compiler itself — deep mutual
 recursion between `compile_expr`, `compile_call`, `compile_stmt`, and
 `compile_binop` means those four functions should be physically adjacent.
 At 4ms total compile time the absolute savings are small, but the technique
-applies to any micropy project with hot call loops.
+applies to any nathra project with hot call loops.
 
 ---
 

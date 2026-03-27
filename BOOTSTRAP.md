@@ -1,6 +1,6 @@
-# Bootstrap Roadmap: Self-Hosting the Micropy Compiler
+# Bootstrap Roadmap: Self-Hosting the Nathra Compiler
 
-> Goal: rewrite the compiler's hot path (92ms of 96ms) in micropy, compile it to
+> Goal: rewrite the compiler's hot path (92ms of 96ms) in nathra, compile it to
 > a native shared library, and call it from Python. The Python side keeps only
 > `ast.parse` (3.7ms) and the binary AST serializer.
 
@@ -126,7 +126,7 @@ Validates the format before any native code is written.
 
 ## Phase 1 — Native AST data structures ✅
 
-Define the AST node structs in micropy. These mirror the Python `ast` module
+Define the AST node structs in nathra. These mirror the Python `ast` module
 but use tagged unions and pointer-based children instead of Python objects.
 
 ### 1.1 — Core node struct
@@ -218,18 +218,18 @@ def deserialize_ast(r: ptr[MpReader], arena: ptr[MpArena]) -> ptr[AstNode]:
 Reads the format defined in Phase 0. Returns the root `AstNode*`. All memory
 comes from the arena — one free cleans up the entire tree.
 
-**Estimated size:** ~400 lines micropy for structs + deserializer.
+**Estimated size:** ~400 lines nathra for structs + deserializer.
 
 ---
 
 ## Phase 2 — Symbol tables and compiler state ✅
 
-Port the compiler's data structures from Python dicts/sets to micropy structs.
+Port the compiler's data structures from Python dicts/sets to nathra structs.
 This is the foundation that the analysis and codegen passes build on.
 
 ### 2.1 — String-keyed hash map
 
-The compiler does ~200 dict lookups by string key. Micropy needs a hash map:
+The compiler does ~200 dict lookups by string key. Nathra needs a hash map:
 
 ```python
 struct StrMap:
@@ -306,7 +306,7 @@ of `ast.Name`/`ast.Subscript` Python objects.
 
 Also port: `get_array_info`, `get_funcptr_info`, `get_vec_info`, `mangle_type`.
 
-**Estimated size:** ~300 lines micropy.
+**Estimated size:** ~300 lines nathra.
 
 ---
 
@@ -333,7 +333,7 @@ def compile_expr(state: ptr[CompilerState], node: ptr[AstNode]) -> str:
         # ... ~20 cases
 ```
 
-The Python version uses `isinstance` chains. The micropy version uses
+The Python version uses `isinstance` chains. The nathra version uses
 `match` on the tag — cleaner and faster.
 
 ### 4.2 — String building
@@ -343,7 +343,7 @@ The hardest part of the port. Python does:
 return f"{left} {op} {right}"
 ```
 
-Micropy:
+Nathra:
 ```python
 return str_format("%s %s %s", left.data, op.data, right.data)
 ```
@@ -353,10 +353,10 @@ the pattern is mechanical.
 
 ### 4.3 — Builtin table
 
-The `builtins` dict (~90 entries mapping micropy names to C names) becomes a
+The `builtins` dict (~90 entries mapping nathra names to C names) becomes a
 static array of `(str, str)` pairs with linear scan, or a pre-built `StrMap`.
 
-**Estimated size:** ~1,400 lines micropy (slightly larger than Python due to
+**Estimated size:** ~1,400 lines nathra (slightly larger than Python due to
 explicit string handling).
 
 ---
@@ -397,7 +397,7 @@ Each of these sub-tasks is a separate function in the native version.
 Emits struct definition, constructor helper, methods, and `@serializable`
 functions. Already well-isolated in the Python code.
 
-**Estimated size:** ~2,500 lines micropy.
+**Estimated size:** ~2,500 lines nathra.
 
 ---
 
@@ -412,7 +412,7 @@ Port the analysis passes from `compiler.py`:
 
 These are all tree walks over `AstNode` — straightforward to port.
 
-**Estimated size:** ~500 lines micropy.
+**Estimated size:** ~500 lines nathra.
 
 ---
 
@@ -454,7 +454,7 @@ lib.compile_ast(ast_buf, len(ast_buf), byref(out_buf), byref(out_len))
 c_source = out_buf.value[:out_len.value].decode()
 ```
 
-**Estimated size:** ~800 lines micropy + ~50 lines Python glue.
+**Estimated size:** ~800 lines nathra + ~50 lines Python glue.
 
 ---
 
@@ -572,7 +572,7 @@ should never be slower than the C compiler it feeds.
 
 ## Prerequisite compiler improvements (completed)
 
-The bootstrap work required several improvements to the micropy compiler itself:
+The bootstrap work required several improvements to the nathra compiler itself:
 
 - **`cast(T, val)` generic builtin** — `cast(ptr[AstNode], expr)` emits `(AstNode*)(expr)`.
   Replaces the limited `cast_int`/`cast_float` builtins for arbitrary type casts.
