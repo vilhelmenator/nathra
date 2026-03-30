@@ -3400,6 +3400,21 @@ class Compiler(StmtMixin, ExprMixin):
                 local_name = alias.asname if alias.asname else alias.name
                 # math functions resolve directly; just skip the module import
             return
+        # c_modules: from X import * triggers header scan + include emission
+        if mod_name in self.c_modules:
+            if mod_name not in self.compiled_files:
+                headers = self.c_modules[mod_name]
+                if isinstance(headers, str):
+                    headers = [headers]
+                mod_info = self.modules.setdefault(
+                    mod_name, ModuleInfo(name=mod_name)
+                )
+                for hdr in headers:
+                    self.c_includes.append(hdr)
+                    self._c_import_header(hdr, mod_info)
+                self.compiled_files.add(mod_name)
+                self._write_c_module_stub(mod_name, mod_info)
+            return
         if mod_name not in self.compiled_files:
             # Check if this is a .py file (codegen hook module) rather than .py
             py_path = os.path.join(self.source_dir, f"{mod_name}.py")

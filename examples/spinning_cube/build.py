@@ -1,5 +1,6 @@
+
 exe("cube",
-    sources=["cube.mpy"],
+    sources=["cube.py"],
     c_modules={
         "glut": {
             "macos": ["<GLUT/glut.h>", "<OpenGL/gl.h>"],
@@ -7,7 +8,7 @@ exe("cube",
         },
     },
     flags={
-        "macos": ["-framework OpenGL", "-framework GLUT", "-framework Cocoa",
+        "macos": ["-framework", "OpenGL", "-framework", "GLUT", "-framework", "Cocoa",
                   "-Wno-deprecated-declarations"],
         "linux": ["-lGL", "-lglut", "-lm"],
     },

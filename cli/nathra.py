@@ -27,10 +27,11 @@ import shutil
 import ctypes
 from ctypes import c_int64, c_int32, POINTER, byref, c_uint8
 
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _HERE)
+
 from compiler import Compiler, CompileError
 from lib.build import run_build_file
-
-_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _find_native_dylib():
