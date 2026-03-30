@@ -1,7 +1,7 @@
 """
 nathra_stubs.py — IDE stubs for the nathra language.
 
-Add this to the top of any .nth file to suppress linter warnings:
+Add this to the top of any .py file to suppress linter warnings:
 
     from nathra_stubs import *
 

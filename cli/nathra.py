@@ -1,19 +1,19 @@
 # !/usr/bin/env python3
 
 """
-Nathra Compiler — compiles .nth files to C.
+Nathra Compiler — compiles .py files to C.
 
 Usage:
-    python nathra.py program.nth                  # compile + link executable
-    python nathra.py program.nth --run            # compile, link, and run
-    python nathra.py program.nth -o output        # specify output name
-    python nathra.py program.nth --emit-c         # emit C only, don't link
-    python nathra.py program.nth --shared         # compile to shared library (.so/.dylib/.dll)
-    python nathra.py program.nth --platform linux # target platform
-    python nathra.py program.nth --watch          # rebuild on source change
-    python nathra.py program.nth --flags="-O2 -march=native"  # extra compiler/linker flags
-    python nathra.py program.nth --flags="-lssl -lz"          # link extra libraries
-    python nathra.py build.nth                    # run project build script
+    python nathra.py program.py                  # compile + link executable
+    python nathra.py program.py --run            # compile, link, and run
+    python nathra.py program.py -o output        # specify output name
+    python nathra.py program.py --emit-c         # emit C only, don't link
+    python nathra.py program.py --shared         # compile to shared library (.so/.dylib/.dll)
+    python nathra.py program.py --platform linux # target platform
+    python nathra.py program.py --watch          # rebuild on source change
+    python nathra.py program.py --flags="-O2 -march=native"  # extra compiler/linker flags
+    python nathra.py program.py --flags="-lssl -lz"          # link extra libraries
+    python nathra.py build.py                    # run project build script
 """
 
 import sys
@@ -92,7 +92,7 @@ def _scan_imports(tree, source_dir: str, stdlib_skip: set) -> list:
             mod = node.module
             if mod in stdlib_skip or mod in seen:
                 continue
-            mpy_path = os.path.join(source_dir, f"{mod}.nth")
+            mpy_path = os.path.join(source_dir, f"{mod}.py")
             if not os.path.exists(mpy_path):
                 continue
             used = {alias.name for alias in node.names}
@@ -308,7 +308,7 @@ def _get_mtime(path: str) -> float:
 
 def main():
     parser = argparse.ArgumentParser(description="MicroPy compiler")
-    parser.add_argument("source", help="Source .nth file or build.nth")
+    parser.add_argument("source", help="Source .py file or build.py")
     parser.add_argument("-o", "--output", help="Output binary name")
     parser.add_argument("--run", action="store_true", help="Compile and run")
     parser.add_argument("--emit-c", action="store_true", help="Only emit C")
@@ -339,8 +339,8 @@ def main():
                         help='Map import name to C header(s): --c-module "glut=<GLUT/glut.h>,<OpenGL/gl.h>"')
     args = parser.parse_args()
 
-    # Route build.nth to the build system
-    if os.path.basename(args.source) == "build.nth":
+    # Route build.py to the build system
+    if os.path.basename(args.source) == "build.py":
         run_build_file(args.source, cc=args.cc, platform=args.platform)
         return
 
@@ -350,7 +350,7 @@ def main():
         ok = build_once(args, source_dir)
         sys.exit(0 if ok else 1)
 
-    # --watch mode: rebuild whenever .nth source changes
+    # --watch mode: rebuild whenever .py source changes
     print(f"Watching {args.source} (Ctrl-C to stop) ...")
     last_mtime = 0.0
     while True:

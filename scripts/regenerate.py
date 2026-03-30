@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Regenerate native/generated/ .c and .h files from native/src/ .nth sources.
+"""Regenerate native/generated/ .c and .h files from native/src/ .py sources.
 
-Uses the Python compiler to compile each .nth file. The output is checked
+Uses the Python compiler to compile each .py file. The output is checked
 into version control so that users can build the native dylib without needing
 the Python compiler.
 
@@ -75,9 +75,9 @@ def main():
     os.makedirs(GEN_DIR, exist_ok=True)
 
     for mod in MODULES:
-        mpy_path = os.path.join(SRC_DIR, f"{mod}.nth")
+        mpy_path = os.path.join(SRC_DIR, f"{mod}.py")
         if not os.path.exists(mpy_path):
-            print(f"  SKIP {mod}.nth (not found)")
+            print(f"  SKIP {mod}.py (not found)")
             continue
 
         c = Compiler(source_dir=SRC_DIR, emit_line_directives=False)

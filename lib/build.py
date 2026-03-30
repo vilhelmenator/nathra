@@ -155,7 +155,7 @@ class BuildRunner:
         return 0.0
 
     def _compile_sources(self, target: BuildTarget):
-        """Compile all .nth sources for a target. Returns (c_files, any_recompiled)."""
+        """Compile all .py sources for a target. Returns (c_files, any_recompiled)."""
         c_files = []
         compiled_files: set = set()
         any_recompiled = False
@@ -306,7 +306,7 @@ class BuildRunner:
 # ---------------------------------------------------------------------------
 
 def run_build_file(build_path: str, cc: str = "gcc", platform: str = "all"):
-    """Execute a build.nth file with the build DSL injected."""
+    """Execute a build.py file with the build DSL injected."""
     build_dir = os.path.dirname(os.path.abspath(build_path))
 
     rt_path = os.path.join(build_dir, "nathra_rt.h")

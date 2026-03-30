@@ -1,4 +1,4 @@
-/* nth_stamp: 1774645808.931380 */
+/* nth_stamp: 1774911850.086977 */
 #include "nathra_rt.h"
 #include "native_infer.h"
 
@@ -25,26 +25,6 @@ NrStr* native_infer__strip_ptr(const NrStr* t) {
         }
     }
     return t;
-}
-
-NrStr* native_infer__binop_method_name(uint8_t op) {
-    "Map operator tag to __method__ name for operator overloading.";
-    if ((op == OP_ADD)) {
-        return nr_str_new("__add__");
-    }
-    if ((op == OP_SUB)) {
-        return nr_str_new("__sub__");
-    }
-    if ((op == OP_MULT)) {
-        return nr_str_new("__mul__");
-    }
-    if ((op == OP_DIV)) {
-        return nr_str_new("__truediv__");
-    }
-    if ((op == OP_MOD)) {
-        return nr_str_new("__mod__");
-    }
-    return NULL;
 }
 
 NrStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstNode* restrict node) {
@@ -120,6 +100,26 @@ NrStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstN
         }
     }
     return nr_str_new("int64_t");
+}
+
+NrStr* native_infer__binop_method_name(uint8_t op) {
+    "Map operator tag to __method__ name for operator overloading.";
+    if ((op == OP_ADD)) {
+        return nr_str_new("__add__");
+    }
+    if ((op == OP_SUB)) {
+        return nr_str_new("__sub__");
+    }
+    if ((op == OP_MULT)) {
+        return nr_str_new("__mul__");
+    }
+    if ((op == OP_DIV)) {
+        return nr_str_new("__truediv__");
+    }
+    if ((op == OP_MOD)) {
+        return nr_str_new("__mod__");
+    }
+    return NULL;
 }
 
 int64_t native_infer__ends_with_star(const NrStr* t) {

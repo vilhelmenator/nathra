@@ -1726,6 +1726,13 @@ class Compiler(StmtMixin, ExprMixin):
             raise CompileError(
                 f"{filepath}:{e.lineno}: syntax error: {e.msg}"
             ) from e
+
+        # Strip "nathra" marker if present (first statement is a bare string "nathra")
+        if (tree.body and isinstance(tree.body[0], ast.Expr)
+                and isinstance(tree.body[0].value, ast.Constant)
+                and tree.body[0].value.value == "nathra"):
+            tree.body.pop(0)
+
         mod_info = ModuleInfo(name=module_name)
 
         # ---- First pass: collect everything ----
@@ -2501,7 +2508,7 @@ class Compiler(StmtMixin, ExprMixin):
         import os as _os
         _src_mtime = _os.path.getmtime(filepath)
         for _mod_name in self.compiled_files:
-            _dep = _os.path.join(self.source_dir, _mod_name + ".nth")
+            _dep = _os.path.join(self.source_dir, _mod_name + ".py")
             if _os.path.exists(_dep):
                 _src_mtime = max(_src_mtime, _os.path.getmtime(_dep))
         c_source = f"/* nth_stamp: {_src_mtime:.6f} */\n" + c_source
@@ -3394,11 +3401,11 @@ class Compiler(StmtMixin, ExprMixin):
                 # math functions resolve directly; just skip the module import
             return
         if mod_name not in self.compiled_files:
-            # Check if this is a .py file (codegen hook module) rather than .nth
+            # Check if this is a .py file (codegen hook module) rather than .py
             py_path = os.path.join(self.source_dir, f"{mod_name}.py")
-            mpy_path = os.path.join(self.source_dir, f"{mod_name}.nth")
+            mpy_path = os.path.join(self.source_dir, f"{mod_name}.py")
             if os.path.exists(py_path) and not os.path.exists(mpy_path):
-                # .py module — record as hook source, don't compile as .nth
+                # .py module — record as hook source, don't compile as .py
                 self._py_imports.add(mod_name)
                 for alias in node.names:
                     local_name = alias.asname if alias.asname else alias.name
@@ -3413,7 +3420,7 @@ class Compiler(StmtMixin, ExprMixin):
             self.from_imports[local_name] = (mod_name, alias.name)
 
     def compile_dependency(self, mod_name: str, used_names: set = None):
-        dep_path = os.path.join(self.source_dir, f"{mod_name}.nth")
+        dep_path = os.path.join(self.source_dir, f"{mod_name}.py")
         if not os.path.exists(dep_path):
             print(f"Warning: cannot find {dep_path}", file=sys.stderr)
             return

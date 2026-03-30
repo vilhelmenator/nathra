@@ -1,7 +1,0 @@
-@test
-def test_scoped_arena() -> void:
-    with scope(arena, 4096):
-        s: str = arena_str_new(arena, "hello")
-        test_assert(str_len(s) == 5)
-    # arena freed automatically here
-    test_assert(1 == 1)

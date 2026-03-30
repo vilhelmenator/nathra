@@ -1,4 +1,4 @@
-"""Bootstrap test: compile a .nth file with both the Python compiler
+"""Bootstrap test: compile a .py file with both the Python compiler
 and the native compiler, compare output."""
 
 import ast
@@ -15,7 +15,7 @@ from compiler import Compiler
 
 
 def compile_with_python(source: str, filepath: str) -> str:
-    """Compile .nth source using the Python compiler."""
+    """Compile .py source using the Python compiler."""
     # Preprocess: struct → class
     source_pp = source.replace("\nstruct ", "\nclass ")
     if source_pp.startswith("struct "):
@@ -29,7 +29,7 @@ def compile_with_python(source: str, filepath: str) -> str:
 
 
 def compile_with_native(source: str, lib_path: str) -> str:
-    """Compile .nth source using the native compiler via ctypes."""
+    """Compile .py source using the native compiler via ctypes."""
     # Preprocess
     source_pp = source.replace("\nstruct ", "\nclass ")
     if source_pp.startswith("struct "):
@@ -94,7 +94,7 @@ def main() -> int:
     # Compile with Python
     # Write temp file for Python compiler
     os.makedirs(os.path.join(_root, "build"), exist_ok=True)
-    tmp_path = os.path.join(_root, "build", "test_input.nth")
+    tmp_path = os.path.join(_root, "build", "test_input.py")
     with open(tmp_path, "w") as f:
         f.write(test_source)
 

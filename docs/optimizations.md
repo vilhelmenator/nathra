@@ -75,8 +75,8 @@ def process(arr: ptr[int], n: int) -> int:
 `--safe` enables runtime safety checks. All checks are gated behind `#ifdef NR_SAFE` so there is zero overhead when compiling without the flag.
 
 ```sh
-python3 cli/nathra.py program.nth --safe          # compile with safety checks
-python3 cli/nathra.py program.nth --safe --run     # compile and run
+python3 cli/nathra.py program.py --safe          # compile with safety checks
+python3 cli/nathra.py program.py --safe --run     # compile and run
 ```
 
 ### Division by zero
@@ -84,7 +84,7 @@ python3 cli/nathra.py program.nth --safe --run     # compile and run
 Integer `/` and `%` are wrapped with a check that aborts with file and line info instead of triggering undefined behavior:
 
 ```python
-x: int = a / b   # aborts with "division by zero at file.nth:3" if b == 0
+x: int = a / b   # aborts with "division by zero at file.py:3" if b == 0
 ```
 
 ### Integer overflow
@@ -93,7 +93,7 @@ x: int = a / b   # aborts with "division by zero at file.nth:3" if b == 0
 
 ```python
 big: int = 9223372036854775807
-result: int = big + 1   # aborts with "integer overflow at file.nth:2"
+result: int = big + 1   # aborts with "integer overflow at file.py:2"
 ```
 
 ### Out-of-bounds access
@@ -102,7 +102,7 @@ Array subscripts are bounds-checked at runtime:
 
 ```python
 arr: array[int, 4] = {1, 2, 3, 4}
-x: int = arr[10]   # aborts with "index 10 out of bounds [0, 4) at file.nth:2"
+x: int = arr[10]   # aborts with "index 10 out of bounds [0, 4) at file.py:2"
 ```
 
 ### Null pointer dereference

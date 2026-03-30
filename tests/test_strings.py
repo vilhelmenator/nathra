@@ -1,0 +1,122 @@
+"nathra"
+@test
+def test_concat_operator() -> void:
+    a: str = str_new("hello")
+    b: str = str_new(" world")
+    c: str = a + b
+    test_assert(str_eq(c, str_new("hello world")))
+
+
+@test
+def test_eq_operator() -> void:
+    a: str = str_new("foo")
+    b: str = str_new("foo")
+    c: str = str_new("bar")
+    test_assert(a == b)
+    test_assert(not (a == c))
+    test_assert(a != c)
+
+
+@test
+def test_str_from_int() -> void:
+    s: str = str(42)
+    test_assert(s == str_new("42"))
+
+
+@test
+def test_str_from_float() -> void:
+    s: str = str(3.14)
+    test_assert(str_len(s) > 0)
+
+
+@test
+def test_method_contains() -> void:
+    s: str = str_new("hello world")
+    test_assert(s.contains(str_new("world")))
+    test_assert(not s.contains(str_new("xyz")))
+
+
+@test
+def test_method_starts_ends() -> void:
+    s: str = str_new("hello world")
+    test_assert(s.starts_with(str_new("hello")))
+    test_assert(s.ends_with(str_new("world")))
+    test_assert(not s.starts_with(str_new("world")))
+
+
+@test
+def test_method_find() -> void:
+    s: str = str_new("hello world")
+    test_assert(s.find(str_new("world")) == 6)
+    test_assert(s.find(str_new("xyz")) == -1)
+
+
+@test
+def test_method_slice() -> void:
+    s: str = str_new("hello world")
+    t: str = s.slice(6, 11)
+    test_assert(t == str_new("world"))
+
+
+@test
+def test_method_upper_lower() -> void:
+    s: str = str_new("Hello")
+    test_assert(s.upper() == str_new("HELLO"))
+    test_assert(s.lower() == str_new("hello"))
+
+
+@test
+def test_strip() -> void:
+    s: str = str_new("  hello  ")
+    test_assert(s.strip() == str_new("hello"))
+    test_assert(s.lstrip() == str_new("hello  "))
+    test_assert(s.rstrip() == str_new("  hello"))
+
+
+@test
+def test_split() -> void:
+    s: str = str_new("a,b,c")
+    parts: list = s.split(str_new(","))
+    test_assert(list_len(parts) == 3)
+
+
+@test
+def test_str_format() -> void:
+    s: str = str_format("x=%d y=%.1f", 7, 3.5)
+    test_assert(s == str_new("x=7 y=3.5"))
+
+
+# ---- literal string syntax (s: str = "hello", no str_new needed) ----
+
+@test
+def test_str_literal_len() -> void:
+    s: str = "hello"
+    test_assert(str_len(s) == 5)
+
+
+@test
+def test_str_literal_eq() -> void:
+    a: str = "world"
+    b: str = str_new("world")
+    test_assert(str_eq(a, b))
+
+
+@test
+def test_str_literal_inline() -> void:
+    # string literal passed directly to str_* without assignment
+    test_assert(str_len("nathra") == 7)
+    test_assert(str_eq("abc", "abc"))
+
+
+@test
+def test_str_literal_upper() -> void:
+    s: str = "hello"
+    u: str = str_upper(s)
+    test_assert(str_eq(u, str_new("HELLO")))
+
+
+@test
+def test_str_literal_contains() -> void:
+    haystack: str = str_new("hello world")
+    test_assert(str_contains(haystack, "world"))
+    test_assert(not str_contains(haystack, "xyz"))

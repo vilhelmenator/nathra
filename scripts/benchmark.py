@@ -35,9 +35,9 @@ def main():
     func.argtypes = [POINTER(c_uint8), c_int64, POINTER(POINTER(c_uint8)), POINTER(c_int64)]
     func.restype = c_int32
 
-    files = sorted(glob.glob(os.path.join(SRC_DIR, "native_*.nth")))
+    files = sorted(glob.glob(os.path.join(SRC_DIR, "native_*.py")))
     if not files:
-        print("No native_*.nth files found.")
+        print("No native_*.py files found.")
         sys.exit(1)
 
     print(f"{'File':<35} {'Python':>10} {'Native':>10} {'Speedup':>10}")
@@ -58,7 +58,7 @@ def main():
         _old_stderr = sys.stderr
         sys.stderr = io.StringIO()
         c = Compiler(source_dir=SRC_DIR, emit_line_directives=False)
-        c.compile_file(f, name.replace(".nth", ""))
+        c.compile_file(f, name.replace(".py", ""))
         sys.stderr = _old_stderr
         t1 = time.perf_counter()
         py_ms = (t1 - t0) * 1000

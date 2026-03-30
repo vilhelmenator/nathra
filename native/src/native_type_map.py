@@ -1,0 +1,303 @@
+"nathra"
+"""Native port of type_map.py — maps AST annotation nodes to C type strings.
+
+Uses the AstNode structs from ast_nodes.nth and StrMap from strmap.nth.
+All functions take ptr[AstNode] instead of Python ast.* objects.
+"""
+
+from nathra_stubs import alloc, free
+from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstAttribute, AstSubscript, AstTuple
+from ast_nodes import TAG_CONSTANT, TAG_NAME, TAG_ATTRIBUTE, TAG_SUBSCRIPT, TAG_TUPLE
+from ast_nodes import CONST_NONE
+from strmap import StrMap, strmap_new, strmap_free, strmap_get, strmap_set
+
+# ── Static type map ─────────────────────────────────────────────────────
+
+class TypeEntry:
+    key:   cstr
+    value: cstr
+
+type_map_entries: array[TypeEntry] = [
+    TypeEntry("int",         "int64_t"),
+    TypeEntry("float",       "double"),
+    TypeEntry("bool",        "int"),
+    TypeEntry("byte",        "uint8_t"),
+    TypeEntry("str",         "NrStr*"),
+    TypeEntry("list",        "NrList*"),
+    TypeEntry("dict",        "NrDict*"),
+    TypeEntry("void",        "void"),
+    TypeEntry("arena",       "NrArena*"),
+    TypeEntry("file",        "NrFile"),
+    TypeEntry("thread",      "NrThread"),
+    TypeEntry("mutex",       "NrMutex*"),
+    TypeEntry("cond",        "NrCond*"),
+    TypeEntry("channel",     "NrChannel*"),
+    TypeEntry("threadpool",  "NrThreadPool*"),
+    TypeEntry("cstr",        "char*"),
+    TypeEntry("va_list",     "va_list"),
+    TypeEntry("f32",         "float"),
+    TypeEntry("f64",         "double"),
+    TypeEntry("i8",          "int8_t"),
+    TypeEntry("i16",         "int16_t"),
+    TypeEntry("i32",         "int32_t"),
+    TypeEntry("i64",         "int64_t"),
+    TypeEntry("u8",          "uint8_t"),
+    TypeEntry("u16",         "uint16_t"),
+    TypeEntry("u32",         "uint32_t"),
+    TypeEntry("u64",         "uint64_t"),
+    TypeEntry("",            "")
+]
+
+def lookup_type(name: str) -> cstr:
+    """Look up a type name in the static type map. Returns NULL if not found."""
+    i: i32 = 0
+    while type_map_entries[i].key[0] != 0:
+        if strcmp(name.data, type_map_entries[i].key) == 0:
+            return type_map_entries[i].value
+        i = i + 1
+    return None
+
+# ── Alias map (populated by compiler, cleared per file) ─────────────────
+
+alias_map_ptr: ptr[StrMap] = None
+
+def alias_init() -> void:
+    alias_map_ptr = alloc(48)
+    m: StrMap = strmap_new(16)
+    deref(cast(ptr[StrMap], alias_map_ptr), m)
+
+def alias_clear() -> void:
+    if alias_map_ptr is not None:
+        strmap_free(alias_map_ptr)
+        m: StrMap = strmap_new(16)
+        deref(cast(ptr[StrMap], alias_map_ptr), m)
+
+# ── mangle_type ─────────────────────────────────────────────────────────
+
+def mangle_type(ctype: str) -> str:
+    """Produce a C-identifier-safe name from a C type string."""
+    len: i64 = str_len(ctype)
+    buf: ptr[byte] = alloc(len * 2 + 1)
+    j: i64 = 0
+    prev_underscore: int = 0
+    for i in range(len):
+        ch: u8 = cast(u8, ctype.data[i])
+        if ch == 42:
+            buf[j] = 80
+            buf[j + 1] = 116
+            buf[j + 2] = 114
+            j = j + 3
+            prev_underscore = 0
+        elif ch == 32:
+            if prev_underscore == 0:
+                buf[j] = 95
+                j = j + 1
+                prev_underscore = 1
+        elif ch == 95:
+            if prev_underscore == 0:
+                buf[j] = 95
+                j = j + 1
+                prev_underscore = 1
+        else:
+            buf[j] = ch
+            j = j + 1
+            prev_underscore = 0
+    buf[j] = 0
+    result: str = str_new(buf)
+    free(buf)
+    return result
+
+# ── map_type ────────────────────────────────────────────────────────────
+
+def native_map_type(node: ptr[AstNode]) -> str:
+    """Map an AST annotation node to a C type string."""
+    if node is None:
+        return str_new("void")
+
+    # Constant (None literal)
+    if node.tag == TAG_CONSTANT:
+        p: ptr[AstConstant] = node.data
+        if p.kind == CONST_NONE:
+            return str_new("void")
+        return str_from_int(p.int_val)
+
+    # Name — simple type lookup
+    if node.tag == TAG_NAME:
+        p2: ptr[AstName] = node.data
+        # Check alias map first
+        if alias_map_ptr is not None:
+            alias: str = strmap_get(alias_map_ptr, p2.id)
+            if alias is not None:
+                return alias
+        # Check static type map
+        mapped: cstr = lookup_type(p2.id)
+        if mapped is not None:
+            return str_new(mapped)
+        # Unknown name — assume it's a struct/user type
+        return p2.id
+
+    # Attribute — mod.TypeName → just use TypeName
+    if node.tag == TAG_ATTRIBUTE:
+        p3: ptr[AstAttribute] = node.data
+        return p3.attr
+
+    # Subscript — ptr[T], array[T,N], func[...], etc.
+    if node.tag == TAG_SUBSCRIPT:
+        p4: ptr[AstSubscript] = node.data
+        base: ptr[AstNode] = p4.value
+        if base.tag == TAG_NAME:
+            base_name: ptr[AstName] = base.data
+            name: str = base_name.id
+
+            if name == "array":
+                return str_new("__array__")
+
+            if name == "typed_list" or name == "list":
+                return str_new("__typed_list__")
+
+            if name == "dict":
+                return str_new("NrDict*")
+
+            if name == "ptr":
+                inner: str = native_map_type(p4.slice)
+                return inner + "*"
+
+            if name == "func":
+                return str_new("__funcptr__")
+
+            if name == "vec":
+                return str_new("__vec__")
+
+            if name == "volatile" or name == "atomic":
+                inner2: str = native_map_type(p4.slice)
+                return "volatile " + inner2
+
+            if name == "thread_local":
+                inner3: str = native_map_type(p4.slice)
+                return "NR_TLS " + inner3
+
+            if name == "static":
+                inner4: str = native_map_type(p4.slice)
+                return "__static__ " + inner4
+
+            if name == "const":
+                inner5: str = native_map_type(p4.slice)
+                return "const " + inner5
+
+            if name == "bitfield":
+                return str_new("__bitfield__")
+
+            if name == "backref":
+                inner6: str = native_map_type(p4.slice)
+                return "__backref__ " + inner6
+
+            if name == "own":
+                inner_own: str = native_map_type(p4.slice)
+                return "__own__ " + inner_own
+
+            if name == "Result":
+                inner7: str = native_map_type(p4.slice)
+                mangled: str = mangle_type(inner7)
+                return "Result_" + mangled
+
+    # Tuple → tuple return type
+    if node.tag == TAG_TUPLE:
+        return str_new("__tuple_ret__")
+
+    return str_new("int64_t")
+
+# ── Helper extractors ──────────────────────────────────────────────────
+
+def native_get_array_info(node: ptr[AstNode], out_elem: ptr[str], out_size: ptr[str]) -> int:
+    """Parse array[T, N] → elem type and size string. Returns 1 on success."""
+    if node is None or node.tag != TAG_SUBSCRIPT:
+        return 0
+    p: ptr[AstSubscript] = node.data
+    slice: ptr[AstNode] = p.slice
+    if slice is None or slice.tag != TAG_TUPLE:
+        return 0
+    tup: ptr[AstTuple] = slice.data
+    if tup.elts.count != 2:
+        return 0
+    deref(out_elem, native_map_type(tup.elts.items[0]))
+    size_node: ptr[AstNode] = tup.elts.items[1]
+    if size_node.tag == TAG_CONSTANT:
+        sc: ptr[AstConstant] = size_node.data
+        deref(out_size, str_from_int(sc.int_val))
+    elif size_node.tag == TAG_NAME:
+        sn: ptr[AstName] = size_node.data
+        deref(out_size, sn.id)
+    else:
+        deref(out_size, str_new("0"))
+    return 1
+
+def native_get_typed_list_elem(node: ptr[AstNode]) -> str:
+    """Parse typed_list[T] or list[T] → element C type."""
+    if node is None or node.tag != TAG_SUBSCRIPT:
+        return str_new("int64_t")
+    p: ptr[AstSubscript] = node.data
+    return native_map_type(p.slice)
+
+def native_get_funcptr_info(node: ptr[AstNode], out_ret: ptr[str], out_args: ptr[ptr[str]], out_argc: ptr[i32]) -> int:
+    """Parse func[T1, T2, ..., Ret] → ret type + arg types. Returns 1 on success."""
+    if node is None or node.tag != TAG_SUBSCRIPT:
+        return 0
+    p: ptr[AstSubscript] = node.data
+    base: ptr[AstNode] = p.value
+    if base is None or base.tag != TAG_NAME:
+        return 0
+    bn: ptr[AstName] = base.data
+    if bn.id == "func" == 0:
+        return 0
+    slice: ptr[AstNode] = p.slice
+    if slice is None:
+        deref(out_ret, str_new("void"))
+        deref(out_argc, 0)
+        return 1
+    if slice.tag == TAG_TUPLE:
+        tup: ptr[AstTuple] = slice.data
+        count: i32 = tup.elts.count
+        if count == 0:
+            deref(out_ret, str_new("void"))
+            deref(out_argc, 0)
+            return 1
+        deref(out_ret, native_map_type(tup.elts.items[count - 1]))
+        arg_count: i32 = count - 1
+        deref(out_argc, arg_count)
+        if arg_count > 0:
+            args: ptr[str] = alloc(cast_int(arg_count) * 8)
+            for i in range(arg_count):
+                args[i] = native_map_type(tup.elts.items[i])
+            deref(out_args, args)
+        return 1
+    else:
+        deref(out_ret, native_map_type(slice))
+        deref(out_argc, 0)
+        return 1
+
+# ── Tests ───────────────────────────────────────────────────────────────
+
+def main() -> int:
+    alias_init()
+
+    # Test static type map lookup
+    assert lookup_type(str_new("int")) is not None
+    assert strcmp(lookup_type(str_new("int")), "int64_t") == 0
+    assert strcmp(lookup_type(str_new("float")), "double") == 0
+    assert strcmp(lookup_type(str_new("u8")), "uint8_t") == 0
+    assert lookup_type(str_new("nonexistent")) is None
+
+    # Test mangle_type
+    m1: str = mangle_type(str_new("int64_t*"))
+    assert m1 == "int64_tPtr"
+
+    m2: str = mangle_type(str_new("const int"))
+    assert m2 == "const_int"
+
+    # Test alias map
+    strmap_set(alias_map_ptr, str_new("MyInt"), str_new("int32_t"))
+    assert str_eq(strmap_get(alias_map_ptr, str_new("MyInt")), str_new("int32_t"))
+
+    ok: str = "PASS: native_type_map"
+    print(ok)
+    return 0

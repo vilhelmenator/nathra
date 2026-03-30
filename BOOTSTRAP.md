@@ -10,7 +10,7 @@
 
 | Step | Tool | Time |
 |------|------|------|
-| Parse `.nth` source | Python `ast.parse` | 3.7 ms |
+| Parse `.py` source | Python `ast.parse` | 3.7 ms |
 | Analysis + codegen | Python (compiler.py + codegen_*.py) | 92 ms |
 | C compilation | gcc/clang | ~80-200 ms |
 
@@ -26,7 +26,7 @@ and `compile_stmt`.
 ```
                     Python side                  Native side (.dylib)
                 ┌──────────────────┐         ┌──────────────────────┐
-  source.nth → │ ast.parse()      │         │                      │
+  source.py → │ ast.parse()      │         │                      │
                │ serialize AST    │──buf──→ │ deserialize AST      │
                │ to NrWriter      │         │ analysis passes      │
                └──────────────────┘         │ codegen → C string   │
@@ -462,10 +462,10 @@ c_source = out_buf.value[:out_len.value].decode()
 
 The moment of truth: compile the native compiler with itself.
 
-1. **First bootstrap:** Python compiler compiles the `.nth` compiler to `.c`,
+1. **First bootstrap:** Python compiler compiles the `.py` compiler to `.c`,
    gcc compiles it to `compiler.dylib`.
 
-2. **Second bootstrap:** `compiler.dylib` compiles the `.nth` compiler source
+2. **Second bootstrap:** `compiler.dylib` compiles the `.py` compiler source
    (via serialized AST). Compare the output `.c` against the Python compiler's
    output — they must be identical.
 
@@ -482,9 +482,9 @@ fallback. Normal development uses the native compiler.
 | Phase | What | Est. | Actual |
 |-------|------|------|--------|
 | 0 | Binary AST format + Python serializer (`ast_serial.py`) | ~400 | 874 |
-| 1 | Native AST structs + deserializer (`ast_nodes.nth`) | ~400 | 806 |
-| 2 | Symbol tables + compiler state (`strmap.nth`) | ~200 | 373 |
-| 3 | Type mapping (`native_type_map.nth`) | ~300 | 295 |
+| 1 | Native AST structs + deserializer (`ast_nodes.py`) | ~400 | 806 |
+| 2 | Symbol tables + compiler state (`strmap.py`) | ~200 | 373 |
+| 3 | Type mapping (`native_type_map.py`) | ~300 | 295 |
 | 4 | Expression codegen | ~1,400 | |
 | 5 | Statement codegen | ~2,500 | |
 | 6 | Analysis passes | ~500 | |
@@ -540,18 +540,18 @@ the Python path and the partial native path, compare results.
 ## Measured performance
 
 Self-compilation benchmark: the native compiler compiling its own 8 source
-modules (3,380 lines of .nth) to C.
+modules (3,380 lines of .py) to C.
 
 | File | Python | Native | Speedup |
 |------|--------|--------|---------|
-| native_analysis.nth | 117.9 ms | 0.20 ms | 595x |
-| native_compile_file.nth | 459.1 ms | 0.78 ms | 587x |
-| native_infer.nth | 124.2 ms | 0.26 ms | 478x |
-| native_type_map.nth | 124.0 ms | 0.28 ms | 438x |
-| native_codegen_stmt.nth | 347.6 ms | 1.01 ms | 344x |
-| native_codegen_call.nth | 247.2 ms | 0.85 ms | 290x |
-| native_codegen_expr.nth | 190.5 ms | 0.66 ms | 289x |
-| native_compiler_state.nth | 35.5 ms | 0.14 ms | 253x |
+| native_analysis.py | 117.9 ms | 0.20 ms | 595x |
+| native_compile_file.py | 459.1 ms | 0.78 ms | 587x |
+| native_infer.py | 124.2 ms | 0.26 ms | 478x |
+| native_type_map.py | 124.0 ms | 0.28 ms | 438x |
+| native_codegen_stmt.py | 347.6 ms | 1.01 ms | 344x |
+| native_codegen_call.py | 247.2 ms | 0.85 ms | 290x |
+| native_codegen_expr.py | 190.5 ms | 0.66 ms | 289x |
+| native_compiler_state.py | 35.5 ms | 0.14 ms | 253x |
 | **Total** | **1,646 ms** | **4.18 ms** | **394x** |
 
 End-to-end compile step breakdown:

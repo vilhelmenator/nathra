@@ -1,0 +1,92 @@
+"nathra"
+"""
+bench.nth — numeric performance benchmark.
+
+Run as nathra:   python3 nathra.py bench/bench.nth --run
+Run as Python:    python3 bench/bench.nth
+"""
+from nathra_stubs import *
+
+ITERS: const = 10_000_000
+
+# ---------------------------------------------------------------------------
+# 1. Float accumulation — tight loop, FP arithmetic
+# ---------------------------------------------------------------------------
+def bench_float_sum(n: int) -> float:
+    acc: float = 0.0
+    i: int = 0
+    while i < n:
+        acc += 1.0 / (float(i) + 1.0)
+        i += 1
+    return acc
+
+# ---------------------------------------------------------------------------
+# 2. Leibniz series — alternating sign, tests branch + FP
+# ---------------------------------------------------------------------------
+def bench_leibniz(n: int) -> float:
+    pi: float = 0.0
+    sign: float = 1.0
+    i: int = 0
+    while i < n:
+        pi += sign / float(2 * i + 1)
+        sign = -sign
+        i += 1
+    return pi * 4.0
+
+# ---------------------------------------------------------------------------
+# 3. Integer arithmetic — alternating sum (stays in int64 range)
+# ---------------------------------------------------------------------------
+def bench_int_sum(n: int) -> int:
+    acc: int = 0
+    i: int = 0
+    while i < n:
+        if i % 2 == 0:
+            acc += i
+        else:
+            acc -= i
+        i += 1
+    return acc
+
+# ---------------------------------------------------------------------------
+# 4. Recursive Fibonacci — call overhead
+# ---------------------------------------------------------------------------
+def fib(n: int) -> int:
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def bench_fib() -> int:
+    return fib(36)
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+def main() -> int:
+    printf("%-20s  %12s  %8s\n", "benchmark", "result", "ms")
+    printf("%-20s  %12s  %8s\n", "--------------------", "------------", "--------")
+
+    t0: int = time_ms()
+    r1: float = bench_float_sum(ITERS)
+    t1: int = time_ms()
+    printf("%-20s  %12.6f  %8d\n", "float_sum", r1, t1 - t0)
+
+    t2: int = time_ms()
+    r2: float = bench_leibniz(ITERS)
+    t3: int = time_ms()
+    printf("%-20s  %12.9f  %8d\n", "leibniz_pi", r2, t3 - t2)
+
+    t4: int = time_ms()
+    r3: int = bench_int_sum(ITERS)
+    t5: int = time_ms()
+    printf("%-20s  %12d  %8d\n", "int_sum", r3, t5 - t4)
+
+    t6: int = time_ms()
+    r4: int = bench_fib()
+    t7: int = time_ms()
+    printf("%-20s  %12d  %8d\n", "fib(36)", r4, t7 - t6)
+
+    return 0
+
+
+if __name__ == "__main__":
+    main()

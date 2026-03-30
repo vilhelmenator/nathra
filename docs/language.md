@@ -592,11 +592,11 @@ struct Circle:
 ### Modules
 
 ```python
-# math_utils.nth
+# math_utils.py
 def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
-# main.nth
+# main.py
 import math_utils
 from math_utils import lerp
 
@@ -689,7 +689,7 @@ save_Entity("scene.bin", root)
 root: ptr[Entity] = load_Entity("scene.bin")
 ```
 
-The compiler walks the object graph depth-first, deduplicates shared pointers, serializes leaves first, and writes pointer fields as indices. On load, all objects are allocated and pointer references are reconstructed. The `.nth` source is the schema.
+The compiler walks the object graph depth-first, deduplicates shared pointers, serializes leaves first, and writes pointer fields as indices. On load, all objects are allocated and pointer references are reconstructed. The `.py` source is the schema.
 
 **Cycle handling** — use `backref[T]` on fields that point back up the tree (e.g. parent pointers). These are skipped during graph collection to prevent infinite loops:
 
@@ -741,16 +741,16 @@ def main() -> int:
 
 No `@extern` declarations, no constant blocks — `import glut` gives you every function and `#define` from the headers.
 
-Map module names to headers via the CLI or `build.nth`:
+Map module names to headers via the CLI or `build.py`:
 
 ```sh
-python3 cli/nathra.py program.nth --c-module "glut=<GLUT/glut.h>,<OpenGL/gl.h>"
+python3 cli/nathra.py program.py --c-module "glut=<GLUT/glut.h>,<OpenGL/gl.h>"
 ```
 
 ```python
-# build.nth
+# build.py
 exe("cube",
-    sources=["cube.nth"],
+    sources=["cube.py"],
     c_modules={
         "glut": {
             "macos": ["<GLUT/glut.h>", "<OpenGL/gl.h>"],
@@ -856,7 +856,7 @@ pool_shutdown(pool)                    # waits for all tasks, then frees
 Mark functions with `@export` and compile to a shared library. The host loads it with `hotreload_open`, calls `get_api()` to get a vtable of function pointers, and can swap the library at runtime without restarting.
 
 ```python
-# game_logic.nth  →  compiled with --shared
+# game_logic.py  →  compiled with --shared
 state: int = 0
 
 @export
@@ -873,7 +873,7 @@ def get_state() -> int:
 ```
 
 ```sh
-python3 cli/nathra.py game_logic.nth --shared   # → game_logic.so / .dylib / .dll
+python3 cli/nathra.py game_logic.py --shared   # → game_logic.so / .dylib / .dll
 ```
 
 The compiler auto-generates a `NrApi` vtable struct and a `get_api()` entry point:
@@ -892,7 +892,7 @@ NrApi* get_api(void);
 Host (can also be nathra):
 
 ```python
-# host.nth
+# host.py
 c_include("<dlfcn.h>")
 
 def main() -> void:
@@ -941,17 +941,17 @@ Variables become C globals that persist between evaluations. State is transferre
 
 ### Build system
 
-`build.nth` is a build script interpreted by nathra's build runner:
+`build.py` is a build script interpreted by nathra's build runner:
 
 ```python
-exe("hello",   sources=["hello.nth"],         run=False)
-exe("tests",   sources=["tests/test_foo.nth"], run=True)
-exe("release", sources=["main.nth"],           flags=["-O2", "-march=native"])
-lib("mylib",   sources=["mylib.nth"],          kind="static")
-lib("plugin",  sources=["plugin.nth"],         kind="shared")
+exe("hello",   sources=["hello.py"],         run=False)
+exe("tests",   sources=["tests/test_foo.py"], run=True)
+exe("release", sources=["main.py"],           flags=["-O2", "-march=native"])
+lib("mylib",   sources=["mylib.py"],          kind="static")
+lib("plugin",  sources=["plugin.py"],         kind="shared")
 ```
 
-Run with `python3 cli/nathra.py build.nth`.
+Run with `python3 cli/nathra.py build.py`.
 
 **Incremental builds** — the compiler embeds the source mtime as `/* nth_stamp: ... */` in every generated `.c` file, including the max mtime of all transitively imported modules. The build runner reads this stamp and skips recompilation when the source is unchanged, without relying on filesystem timestamps.
 
@@ -994,9 +994,9 @@ In release builds, heap tracking compiles out — zero overhead.
 
 ### Error messages
 
-Compiler errors point directly to the `.nth` source line via `#line` directives:
+Compiler errors point directly to the `.py` source line via `#line` directives:
 
 ```
-tests/my_prog.nth:12:5: error: use of undeclared identifier 'typo'
+tests/my_prog.py:12:5: error: use of undeclared identifier 'typo'
 ```
 

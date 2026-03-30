@@ -22,19 +22,21 @@ def update(particles: array[Particle, 1024], dt: float) -> void:
 
 ```sh
 make                                          # build the native compiler (~2 sec)
-python3 cli/nathra.py program.nth             # compile + link
-python3 cli/nathra.py program.nth --run       # compile, link, run
-python3 cli/nathra.py program.nth --emit-c    # emit C only
-python3 cli/nathra.py program.nth --safe      # enable runtime safety checks
-python3 cli/nathra.py program.nth --shared    # compile to shared library
-python3 cli/nathra.py build.nth               # run a project build script
+python3 cli/nathra.py program.py             # compile + link
+python3 cli/nathra.py program.py --run       # compile, link, run
+python3 cli/nathra.py program.py --emit-c    # emit C only
+python3 cli/nathra.py program.py --safe      # enable runtime safety checks
+python3 cli/nathra.py program.py --shared    # compile to shared library
+python3 cli/nathra.py build.py               # run a project build script
 python3 cli/snekc.py                          # interactive REPL
 ```
 
 ## Example
 
 ```python
-# hello.nth
+# hello.py
+"nathra"
+
 struct Vec2:
     x: float
     y: float
@@ -49,11 +51,11 @@ def main() -> int:
 ```
 
 ```sh
-$ python3 cli/nathra.py hello.nth --run
+$ python3 cli/nathra.py hello.py --run
 5.000000
 ```
 
-The compiler emits readable C, invokes `gcc`, and runs the binary. Errors point to `hello.nth` line numbers, and `#line` directives let native debuggers map stepping back to the original `.nth` source.
+The compiler emits readable C, invokes `gcc`, and runs the binary. Errors point to `hello.py` line numbers, and `#line` directives let native debuggers map stepping back to the original `.py` source.
 
 ## What makes it different
 
@@ -61,7 +63,7 @@ The compiler emits readable C, invokes `gcc`, and runs the binary. Errors point 
 
 **Python syntax, C semantics.** Valid Python syntax means Python-aware editors can parse and highlight it, and the language is easy for humans and LLMs to read and write without learning a new grammar. But the semantics are C-level: no garbage collector, no Python runtime, no Python object model. Structs are value types. Pointers are explicit. You control the memory layout.
 
-**Portable C output.** The compiler emits readable, auditable C. You can inspect it, diff it, and feed it to any C compiler on any platform. `#line` directives map compiler diagnostics and native debugger stepping back to the original `.nth` source. No LLVM dependency, no custom backend.
+**Portable C output.** The compiler emits readable, auditable C. You can inspect it, diff it, and feed it to any C compiler on any platform. `#line` directives map compiler diagnostics and native debugger stepping back to the original `.py` source. No LLVM dependency, no custom backend.
 
 **Automatic cleanup for local allocations.** The compiler's escape analysis detects local-only `str`, `list[T]`, and `dict` variables and inserts cleanup automatically. When you need more control, escalate to `defer`, `own[T]`, scoped arenas, or raw `alloc`/`free`.
 
@@ -140,7 +142,7 @@ nathra/
     nathra_types.h                    Forward declarations
     nathra_test.h                     Test runner infrastructure
   native/                             Bootstrap native compiler (405x faster)
-    src/                              .nth source for the native compiler
+    src/                              .py source for the native compiler
     generated/                        Pre-generated .c/.h — just run make
   lib/
     build.py                          Build script interpreter
@@ -152,7 +154,7 @@ nathra/
 
 ```sh
 make                    # build native compiler from pre-generated C (~2 sec)
-make regenerate         # regenerate C from .nth sources (needs Python compiler)
+make regenerate         # regenerate C from .py sources (needs Python compiler)
 make test               # run the test suite
 make clean              # remove build artifacts
 ```

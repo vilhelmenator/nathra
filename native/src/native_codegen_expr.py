@@ -1,0 +1,521 @@
+"nathra"
+"""Native port of compile_expr — expression code generation.
+
+Substages 4.1-4.4: operators, literals, arithmetic, comparisons,
+subscript, attribute access. Call dispatch (4.5-4.8) is separate.
+"""
+
+from nathra_stubs import alloc, free
+from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstAttribute
+from ast_nodes import AstSubscript, AstTuple, AstList, AstSet, AstBinOp
+from ast_nodes import AstUnaryOp, AstBoolOp, AstCompare, AstCall, AstIfExp
+from ast_nodes import AstListComp, AstLambda, AstJoinedStr, AstFormattedValue
+from ast_nodes import TAG_FORMATTED_VAL, CONST_BOOL, CONST_INT, CONST_FLOAT, CONST_STR
+from ast_nodes import TAG_CONSTANT, TAG_NAME, TAG_BIN_OP, TAG_UNARY_OP
+from ast_nodes import TAG_BOOL_OP, TAG_COMPARE, TAG_CALL, TAG_ATTRIBUTE
+from ast_nodes import TAG_SUBSCRIPT, TAG_IF_EXP, TAG_TUPLE, TAG_LIST
+from ast_nodes import TAG_SET, TAG_JOINED_STR, TAG_LIST_COMP, TAG_LAMBDA
+from ast_nodes import CONST_NONE, CONST_BOOL, CONST_INT, CONST_FLOAT, CONST_STR, CONST_ELLIPSIS
+from ast_nodes import OP_ADD, OP_SUB, OP_MULT, OP_DIV, OP_MOD, OP_POW, OP_FLOOR_DIV
+from ast_nodes import OP_LSHIFT, OP_RSHIFT, OP_BIT_OR, OP_BIT_XOR, OP_BIT_AND
+from ast_nodes import OP_UADD, OP_USUB, OP_NOT, OP_INVERT
+from ast_nodes import OP_AND, OP_OR
+from ast_nodes import OP_EQ, OP_NOT_EQ, OP_LT, OP_LT_E, OP_GT, OP_GT_E, OP_IS, OP_IS_NOT, OP_IN, OP_NOT_IN
+from strmap import StrMap, StrSet, strmap_get, strmap_has, strset_has
+from native_compiler_state import CompilerState, FieldList, field_list_find
+from native_infer import native_infer_type, _strip_ptr, _ends_with_star
+
+# Forward declaration for call dispatch (circular dep: call imports expr)
+# Can't import the module (circular), so declare the prototype directly.
+c_code("NrStr* native_codegen_call_native_compile_call(CompilerState* s, AstNode* node);")
+
+# ── compile_op ──────────────────────────────────────────────────────────
+
+def native_compile_op(op: u8) -> str:
+    """Map binary operator tag to C operator string."""
+    if op == OP_ADD:       return str_new("+")
+    if op == OP_SUB:       return str_new("-")
+    if op == OP_MULT:      return str_new("*")
+    if op == OP_DIV:       return str_new("/")
+    if op == OP_MOD:       return str_new("%")
+    if op == OP_LSHIFT:    return str_new("<<")
+    if op == OP_RSHIFT:    return str_new(">>")
+    if op == OP_BIT_AND:   return str_new("&")
+    if op == OP_BIT_OR:    return str_new("|")
+    if op == OP_BIT_XOR:   return str_new("^")
+    if op == OP_FLOOR_DIV: return str_new("/")
+    return str_new("?")
+
+# ── compile_cmpop ───────────────────────────────────────────────────────
+
+def native_compile_cmpop(op: u8) -> str:
+    """Map comparison operator tag to C operator string."""
+    if op == OP_EQ:     return str_new("==")
+    if op == OP_NOT_EQ: return str_new("!=")
+    if op == OP_LT:     return str_new("<")
+    if op == OP_LT_E:   return str_new("<=")
+    if op == OP_GT:     return str_new(">")
+    if op == OP_GT_E:   return str_new(">=")
+    if op == OP_IS:     return str_new("==")
+    if op == OP_IS_NOT: return str_new("!=")
+    return str_new("?")
+
+# ── String escape helper ────────────────────────────────────────────────
+
+def _escape_str(s: str) -> str:
+    """Escape a string for C string literal (\\, \", \\n)."""
+    slen: i64 = str_len(s)
+    buf: ptr[byte] = alloc(slen * 2 + 1)
+    j: i64 = 0
+    for i in range(slen):
+        ch: u8 = cast(u8, s.data[i])
+        if ch == 92:
+            buf[j] = 92
+            buf[j + 1] = 92
+            j = j + 2
+        elif ch == 34:
+            buf[j] = 92
+            buf[j + 1] = 34
+            j = j + 2
+        elif ch == 10:
+            buf[j] = 92
+            buf[j + 1] = 110
+            j = j + 2
+        else:
+            buf[j] = ch
+            j = j + 1
+    buf[j] = 0
+    result: str = str_new(buf)
+    free(buf)
+    return result
+
+# ── Operator overload method names ──────────────────────────────────────
+
+def _binop_method(op: u8) -> str:
+    if op == OP_ADD:  return str_new("__add__")
+    if op == OP_SUB:  return str_new("__sub__")
+    if op == OP_MULT: return str_new("__mul__")
+    if op == OP_DIV:  return str_new("__truediv__")
+    if op == OP_MOD:  return str_new("__mod__")
+    return None
+
+def _cmpop_method(op: u8) -> str:
+    if op == OP_EQ:     return str_new("__eq__")
+    if op == OP_NOT_EQ: return str_new("__ne__")
+    if op == OP_LT:     return str_new("__lt__")
+    if op == OP_LT_E:   return str_new("__le__")
+    if op == OP_GT:     return str_new("__gt__")
+    if op == OP_GT_E:   return str_new("__ge__")
+    return None
+
+# ── emit helper ─────────────────────────────────────────────────────────
+
+def _emit(s: ptr[CompilerState], line: str) -> void:
+    """Emit a line of C code to the output buffer."""
+    # Write indent
+    for i in range(s.indent):
+        nr_write_text(s.lines, str_new("    "))
+    nr_write_text(s.lines, line)
+    nr_write_text(s.lines, str_new("\n"))
+
+# ── compile_expr ────────────────────────────────────────────────────────
+
+def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
+    """Compile an AST expression node to a C expression string."""
+    if node is None:
+        return str_new("0")
+
+    # ── 4.1: Constant ───────────────────────────────────────────────
+    if node.tag == TAG_CONSTANT:
+        p: ptr[AstConstant] = node.data
+        if p.kind == CONST_NONE:
+            return str_new("NULL")
+        if p.kind == CONST_BOOL:
+            if p.int_val != 0:
+                return str_new("1")
+            return str_new("0")
+        if p.kind == CONST_STR:
+            escaped: str = _escape_str(p.str_val)
+            return str_concat(str_new("\""), escaped + "\"")
+        if p.kind == CONST_FLOAT:
+            return str_from_float(p.float_val)
+        if p.kind == CONST_INT:
+            return str_from_int(p.int_val)
+        if p.kind == CONST_ELLIPSIS:
+            return str_new("0")
+        return str_new("0")
+
+    # ── 4.1: Name ───────────────────────────────────────────────────
+    if node.tag == TAG_NAME:
+        p2: ptr[AstName] = node.data
+        if p2.id == "True":
+            return str_new("1")
+        if p2.id == "False":
+            return str_new("0")
+        if p2.id == "None":
+            return str_new("NULL")
+        return p2.id
+
+    # ── 4.2: BinOp ──────────────────────────────────────────────────
+    if node.tag == TAG_BIN_OP:
+        p3: ptr[AstBinOp] = node.data
+        # String concatenation with auto-coercion of literals
+        if p3.op == OP_ADD:
+            lt: str = native_infer_type(s, p3.left)
+            if lt == "NrStr*":
+                left: str = native_compile_expr(s, p3.left)
+                right: str = native_compile_expr(s, p3.right)
+                # Auto-coerce string literals on either side
+                if p3.left.tag == TAG_CONSTANT:
+                    lc: ptr[AstConstant] = p3.left.data
+                    if lc.kind == CONST_STR and lc.str_val is not None:
+                        esc_l: str = _escape_str(lc.str_val)
+                        left = str_format("(&(NrStr){.data=(char*)\"%s\",.len=%lld})", esc_l.data, str_len(lc.str_val))
+                if p3.right.tag == TAG_CONSTANT:
+                    rc: ptr[AstConstant] = p3.right.data
+                    if rc.kind == CONST_STR and rc.str_val is not None:
+                        esc_r: str = _escape_str(rc.str_val)
+                        right = str_format("(&(NrStr){.data=(char*)\"%s\",.len=%lld})", esc_r.data, str_len(rc.str_val))
+                return str_format("nr_str_concat(%s, %s)", left.data, right.data)
+        # Operator overloading
+        lt2: str = native_infer_type(s, p3.left)
+        lb: str = _strip_ptr(lt2)
+        if strmap_has(addr_of(s.structs), lb):
+            method: str = _binop_method(p3.op)
+            if method is not None:
+                mname: str = str_concat(lb + "_", method)
+                if strmap_has(addr_of(s.func_ret_types), mname):
+                    left2: str = native_compile_expr(s, p3.left)
+                    right2: str = native_compile_expr(s, p3.right)
+                    if _ends_with_star(lt2):
+                        return str_format("%s(%s, %s)", mname.data, left2.data, right2.data)
+                    return str_format("%s(&(%s), %s)", mname.data, left2.data, right2.data)
+        # Standard arithmetic
+        left3: str = native_compile_expr(s, p3.left)
+        right3: str = native_compile_expr(s, p3.right)
+        if p3.op == OP_POW:
+            return str_format("pow(%s, %s)", left3.data, right3.data)
+        # Safety checks (--safe)
+        if s.safe_mode != 0:
+            lt3: str = native_infer_type(s, p3.left)
+            if lt3 == "int64_t" or lt3 == "int" or lt3 == "int32_t" or lt3 == "uint8_t":
+                if p3.op == OP_DIV or p3.op == OP_FLOOR_DIV:
+                    return str_format("nr_safe_div_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_MOD:
+                    return str_format("nr_safe_mod_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_ADD:
+                    return str_format("nr_safe_add_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_SUB:
+                    return str_format("nr_safe_sub_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+                if p3.op == OP_MULT:
+                    return str_format("nr_safe_mul_i64(%s, %s, __FILE__, __LINE__)", left3.data, right3.data)
+        if p3.op == OP_FLOOR_DIV:
+            return str_format("((%s) / (%s))", left3.data, right3.data)
+        op: str = native_compile_op(p3.op)
+        return str_format("(%s %s %s)", left3.data, op.data, right3.data)
+
+    # ── 4.2: UnaryOp ────────────────────────────────────────────────
+    if node.tag == TAG_UNARY_OP:
+        p4: ptr[AstUnaryOp] = node.data
+        # __neg__ overloading
+        if p4.op == OP_USUB:
+            ot: str = native_infer_type(s, p4.operand)
+            ob: str = _strip_ptr(ot)
+            neg_name: str = ob + "___neg__"
+            if strmap_has(addr_of(s.structs), ob):
+                if strmap_has(addr_of(s.func_ret_types), neg_name):
+                    operand: str = native_compile_expr(s, p4.operand)
+                    if _ends_with_star(ot):
+                        return str_format("%s(%s)", neg_name.data, operand.data)
+                    return str_format("%s(&(%s))", neg_name.data, operand.data)
+        operand2: str = native_compile_expr(s, p4.operand)
+        if p4.op == OP_USUB:   return str_format("(-%s)", operand2.data)
+        if p4.op == OP_UADD:   return str_format("(+%s)", operand2.data)
+        if p4.op == OP_NOT:    return str_format("(!%s)", operand2.data)
+        if p4.op == OP_INVERT: return str_format("(~%s)", operand2.data)
+
+    # ── 4.2: BoolOp ─────────────────────────────────────────────────
+    if node.tag == TAG_BOOL_OP:
+        p5: ptr[AstBoolOp] = node.data
+        op_str: str = str_new(" && ")
+        if p5.op == OP_OR:
+            op_str = str_new(" || ")
+        result: str = native_compile_expr(s, p5.values.items[0])
+        for i in range(1, p5.values.count):
+            part: str = native_compile_expr(s, p5.values.items[i])
+            result = str_concat(result, op_str + part)
+        return str_format("(%s)", result.data)
+
+    # ── 4.3: Compare ────────────────────────────────────────────────
+    if node.tag == TAG_COMPARE:
+        p6: ptr[AstCompare] = node.data
+        # String == / != comparison with auto-coercion
+        if p6.op_count == 1 and p6.comparators.count == 1:
+            lt3: str = native_infer_type(s, p6.left)
+            if lt3 == "NrStr*":
+                left4: str = native_compile_expr(s, p6.left)
+                right4: str = native_compile_expr(s, p6.comparators.items[0])
+                # Auto-coerce string literals
+                cmp_node: ptr[AstNode] = p6.comparators.items[0]
+                if cmp_node.tag == TAG_CONSTANT:
+                    cmp_c: ptr[AstConstant] = cmp_node.data
+                    if cmp_c.kind == CONST_STR and cmp_c.str_val is not None:
+                        esc_c: str = _escape_str(cmp_c.str_val)
+                        right4 = str_format("(&(NrStr){.data=(char*)\"%s\",.len=%lld})", esc_c.data, str_len(cmp_c.str_val))
+                left_node: ptr[AstNode] = p6.left
+                if left_node.tag == TAG_CONSTANT:
+                    left_c: ptr[AstConstant] = left_node.data
+                    if left_c.kind == CONST_STR and left_c.str_val is not None:
+                        esc_lc: str = _escape_str(left_c.str_val)
+                        left4 = str_format("(&(NrStr){.data=(char*)\"%s\",.len=%lld})", esc_lc.data, str_len(left_c.str_val))
+                if p6.ops[0] == OP_EQ:
+                    return str_format("nr_str_eq(%s, %s)", left4.data, right4.data)
+                if p6.ops[0] == OP_NOT_EQ:
+                    return str_format("(!nr_str_eq(%s, %s))", left4.data, right4.data)
+        # Comparison operator overloading
+        if p6.op_count == 1 and p6.comparators.count == 1:
+            lt4: str = native_infer_type(s, p6.left)
+            lb2: str = _strip_ptr(lt4)
+            if strmap_has(addr_of(s.structs), lb2):
+                cmethod: str = _cmpop_method(p6.ops[0])
+                if cmethod is not None:
+                    cmname: str = str_concat(lb2 + "_", cmethod)
+                    if strmap_has(addr_of(s.func_ret_types), cmname):
+                        left5: str = native_compile_expr(s, p6.left)
+                        right5: str = native_compile_expr(s, p6.comparators.items[0])
+                        return str_format("%s(&(%s), %s)", cmname.data, left5.data, right5.data)
+        # `in` / `not in` operator for lists and dicts
+        if p6.op_count == 1 and (p6.ops[0] == OP_IN or p6.ops[0] == OP_NOT_IN):
+            cmp_r: ptr[AstNode] = p6.comparators.items[0]
+            if cmp_r is not None and cmp_r.tag == TAG_NAME:
+                cmp_rn: ptr[AstName] = cmp_r.data
+                # Dict: check __dict_V_ marker
+                dv_check: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + cmp_rn.id)
+                if dv_check is not None:
+                    in_obj: str = native_compile_expr(s, cmp_r)
+                    in_key: str = native_compile_expr(s, p6.left)
+                    in_expr: str = str_format("nr_dict_has(%s, %s)", in_obj.data, in_key.data)
+                    if p6.ops[0] == OP_NOT_IN:
+                        in_expr = str_format("(!%s)", in_expr.data)
+                    return in_expr
+                # List: check list_vars
+                l_check: str = strmap_get(addr_of(s.list_vars), cmp_rn.id)
+                if l_check is not None:
+                    in_obj2: str = native_compile_expr(s, cmp_r)
+                    in_val: str = native_compile_expr(s, p6.left)
+                    in_boxed: str = str_format("nr_val_int((int64_t)(%s))", in_val.data)
+                    in_expr2: str = str_format("nr_list_contains(%s, %s)", in_obj2.data, in_boxed.data)
+                    if p6.ops[0] == OP_NOT_IN:
+                        in_expr2 = str_format("(!%s)", in_expr2.data)
+                    return in_expr2
+
+        # General comparison (possibly chained)
+        left6: str = native_compile_expr(s, p6.left)
+        result2: str = str_new("")
+        prev: str = left6
+        for i in range(p6.op_count):
+            right6: str = native_compile_expr(s, p6.comparators.items[i])
+            cop: str = native_compile_cmpop(p6.ops[i])
+            part2: str = str_format("(%s %s %s)", prev.data, cop.data, right6.data)
+            if i > 0:
+                result2 = str_concat(result2, " && " + part2)
+            else:
+                result2 = part2
+            prev = right6
+        return result2
+
+    # ── 4.3: IfExp ──────────────────────────────────────────────────
+    if node.tag == TAG_IF_EXP:
+        p7: ptr[AstIfExp] = node.data
+        test: str = native_compile_expr(s, p7.test)
+        body: str = native_compile_expr(s, p7.body)
+        orelse: str = native_compile_expr(s, p7.orelse)
+        return str_format("((%s) ? (%s) : (%s))", test.data, body.data, orelse.data)
+
+    # ── 4.3: Tuple / List / Set literals ────────────────────────────
+    if node.tag == TAG_TUPLE or node.tag == TAG_LIST or node.tag == TAG_SET:
+        p8: ptr[AstTuple] = node.data
+        result3: str = str_new("{")
+        for i in range(p8.elts.count):
+            if i > 0:
+                result3 = result3 + ", "
+            result3 = str_concat(result3, native_compile_expr(s, p8.elts.items[i]))
+        result3 = result3 + "}"
+        return result3
+
+    # ── 4.4: Subscript ──────────────────────────────────────────────
+    if node.tag == TAG_SUBSCRIPT:
+        p9: ptr[AstSubscript] = node.data
+        # Typed list subscript: TypedList_get(obj, idx)
+        if p9.value is not None and p9.value.tag == TAG_NAME:
+            sub_n: ptr[AstName] = p9.value.data
+            sub_et: str = strmap_get(addr_of(s.list_vars), sub_n.id)
+            if sub_et is not None:
+                sub_ln: str = strmap_get(addr_of(s.typed_lists), sub_et)
+                if sub_ln is not None:
+                    lst: str = native_compile_expr(s, p9.value)
+                    idx: str = native_compile_expr(s, p9.slice)
+                    if s.safe_mode != 0:
+                        _emit(s, str_format("nr_safe_bounds_check(%s, %s->len, __FILE__, __LINE__);", idx.data, lst.data))
+                    return str_format("%s_get(%s, %s)", sub_ln.data, lst.data, idx.data)
+        # Dict subscript read: d["key"] → unbox(dict_get(d, key))
+        if p9.value is not None and p9.value.tag == TAG_NAME:
+            d_n: ptr[AstName] = p9.value.data
+            d_vt: str = strmap_get(addr_of(s.local_vars), "__dict_V_" + d_n.id)
+            if d_vt is not None:
+                d_obj: str = native_compile_expr(s, p9.value)
+                d_key: str = native_compile_expr(s, p9.slice)
+                d_raw: str = str_format("nr_dict_get(%s, %s)", d_obj.data, d_key.data)
+                if d_vt == "double":
+                    return str_format("nr_as_float(%s)", d_raw.data)
+                return str_format("nr_as_int(%s)", d_raw.data)
+        val: str = native_compile_expr(s, p9.value)
+        sl: str = native_compile_expr(s, p9.slice)
+        # Bounds check for known arrays (--safe)
+        if s.safe_mode != 0 and p9.value is not None and p9.value.tag == TAG_NAME:
+            arr_n: ptr[AstName] = p9.value.data
+            arr_ai: ptr[ArrayInfo] = strmap_get(addr_of(s.array_vars), arr_n.id)
+            if arr_ai is not None:
+                _emit(s, str_format("nr_safe_bounds_check(%s, %s, __FILE__, __LINE__);", sl.data, arr_ai.size.data))
+        return str_format("%s[%s]", val.data, sl.data)
+
+    # ── 4.4: Attribute ──────────────────────────────────────────────
+    if node.tag == TAG_ATTRIBUTE:
+        p10: ptr[AstAttribute] = node.data
+        attr_name: str = p10.attr
+        # Enum member access: Color.RED → Color_RED
+        if p10.value is not None and p10.value.tag == TAG_NAME:
+            obj_name: ptr[AstName] = p10.value.data
+            if strset_has(addr_of(s.extern_funcs), obj_name.id):
+                return str_format("%s_%s", obj_name.id.data, attr_name.data)
+        val2: str = native_compile_expr(s, p10.value)
+        obj_type: str = native_infer_type(s, p10.value)
+        if _ends_with_star(obj_type):
+            # Null check before pointer dereference (--safe)
+            if s.safe_mode != 0 and p10.value is not None and p10.value.tag == TAG_NAME:
+                _emit(s, str_format("nr_safe_null_check(%s, __FILE__, __LINE__);", val2.data))
+            return str_format("%s->%s", val2.data, attr_name.data)
+        return str_format("%s.%s", val2.data, attr_name.data)
+
+    # ── F-string (JoinedStr) ────────────────────────────────────────
+    if node.tag == TAG_JOINED_STR:
+        js: ptr[AstJoinedStr] = node.data
+        fmt: str = str_new("")
+        args: str = str_new("")
+        for i in range(js.values.count):
+            part: ptr[AstNode] = js.values.items[i]
+            if part.tag == TAG_CONSTANT:
+                pc: ptr[AstConstant] = part.data
+                if pc.kind == CONST_STR and pc.str_val is not None:
+                    # Escape for C string: \, ", newline, tab, %
+                    slen: i64 = str_len(pc.str_val)
+                    for ci in range(slen):
+                        ch: u8 = cast(u8, pc.str_val.data[ci])
+                        if ch == 92:
+                            fmt = fmt + "\\\\"
+                        elif ch == 34:
+                            fmt = fmt + "\\\""
+                        elif ch == 10:
+                            fmt = fmt + "\\n"
+                        elif ch == 9:
+                            fmt = fmt + "\\t"
+                        elif ch == 37:
+                            fmt = fmt + "%%"
+                        else:
+                            buf2: ptr[byte] = alloc(2)
+                            buf2[0] = ch
+                            buf2[1] = 0
+                            fmt = str_concat(fmt, str_new(buf2))
+                            free(buf2)
+            elif part.tag == TAG_FORMATTED_VAL:
+                fv: ptr[AstFormattedValue] = part.data
+                expr: str = native_compile_expr(s, fv.value)
+                t: str = native_infer_type(s, fv.value)
+                # Extract format spec
+                spec: str = str_new("")
+                if fv.format_spec is not None and fv.format_spec.tag == TAG_JOINED_STR:
+                    sp_js: ptr[AstJoinedStr] = fv.format_spec.data
+                    for si in range(sp_js.values.count):
+                        sp_part: ptr[AstNode] = sp_js.values.items[si]
+                        if sp_part.tag == TAG_CONSTANT:
+                            sp_c: ptr[AstConstant] = sp_part.data
+                            if sp_c.kind == CONST_STR and sp_c.str_val is not None:
+                                spec = str_concat(spec, sp_c.str_val)
+                if str_len(spec) > 0:
+                    # Get last char of spec
+                    spec_last: u8 = cast(u8, spec.data[str_len(spec) - 1])
+                    if (spec_last == 100 or spec_last == 105) and (t == "int64_t" or t == "int" or t == "uint8_t"):
+                        # d/i with integer → widen to long long
+                        spec_prefix: str = str_slice(spec, 0, str_len(spec) - 1)
+                        fmt = str_concat(fmt, str_concat(str_concat(str_new("%"), spec_prefix), str_new("lld")))
+                        args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                    elif (spec_last == 120 or spec_last == 88) and (t == "int64_t" or t == "int" or t == "uint8_t"):
+                        # x/X with integer → widen to long long
+                        spec_prefix2: str = str_slice(spec, 0, str_len(spec) - 1)
+                        last_ch_buf: ptr[byte] = alloc(2)
+                        last_ch_buf[0] = spec_last
+                        last_ch_buf[1] = 0
+                        last_ch_str: str = str_new(last_ch_buf)
+                        free(last_ch_buf)
+                        fmt = str_concat(fmt, str_concat(str_concat(str_concat(str_new("%"), spec_prefix2), str_new("ll")), last_ch_str))
+                        args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                    elif spec_last == 102 and t == "double":
+                        # f with double → use as-is
+                        fmt = str_concat(fmt, str_concat(str_new("%"), spec))
+                        args = str_concat(args, str_format(", %s", expr.data))
+                    else:
+                        fmt = str_concat(fmt, str_concat(str_new("%"), spec))
+                        args = str_concat(args, str_format(", %s", expr.data))
+                elif t == "double":
+                    fmt = fmt + "%g"
+                    args = str_concat(args, str_format(", %s", expr.data))
+                elif t == "int64_t":
+                    fmt = fmt + "%lld"
+                    args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+                elif t == "uint8_t":
+                    fmt = fmt + "%u"
+                    args = str_concat(args, str_format(", (unsigned)(%s)", expr.data))
+                elif t == "int":
+                    fmt = fmt + "%d"
+                    args = str_concat(args, str_format(", (int)(%s)", expr.data))
+                elif t == "NrStr*":
+                    fmt = fmt + "%.*s"
+                    args = str_concat(args, str_format(", (int)((%s)->len), ((%s)->data)", expr.data, expr.data))
+                else:
+                    fmt = fmt + "%lld"
+                    args = str_concat(args, str_format(", (long long)(%s)", expr.data))
+        # Emit snprintf + stack NrStr*
+        s.fstr_counter = s.fstr_counter + 1
+        buf_name: str = str_format("_fstr_%d", s.fstr_counter)
+        svar_name: str = str_format("_fstr_s_%d", s.fstr_counter)
+        _emit(s, str_format("char %s[512]; snprintf(%s, 512, \"%s\"%s);", buf_name.data, buf_name.data, fmt.data, args.data))
+        _emit(s, str_format("NrStr %s = {.data=%s,.len=strlen(%s)}; ", svar_name.data, buf_name.data, buf_name.data))
+        return str_format("(&%s)", svar_name.data)
+
+    # ── Call dispatch (forward declared above, linked from native_codegen_call)
+    if node.tag == TAG_CALL:
+        return native_codegen_call_native_compile_call(s, node)
+
+    # ── Fallback ────────────────────────────────────────────────────
+    return str_new("0 /* unknown expr */")
+
+# ── Test ────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    # Test compile_op
+    assert str_eq(native_compile_op(OP_ADD), str_new("+"))
+    assert str_eq(native_compile_op(OP_SUB), str_new("-"))
+    assert str_eq(native_compile_op(OP_MULT), str_new("*"))
+    assert str_eq(native_compile_op(OP_BIT_AND), str_new("&"))
+
+    # Test compile_cmpop
+    assert str_eq(native_compile_cmpop(OP_EQ), str_new("=="))
+    assert str_eq(native_compile_cmpop(OP_LT), str_new("<"))
+    assert str_eq(native_compile_cmpop(OP_IS), str_new("=="))
+
+    # Test escape
+    assert str_eq(_escape_str(str_new("hello")), str_new("hello"))
+
+    ok: str = "PASS: native_codegen_expr 4.1-4.4"
+    print(ok)
+    return 0

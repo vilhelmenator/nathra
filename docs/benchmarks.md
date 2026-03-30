@@ -4,7 +4,7 @@
 
 ### Python vs nathra
 
-`bench/bench.nth` is a dual-mode file that runs as plain Python and compiles with nathra. `bench/run.py` builds the binary with `-O2`, runs both, and prints a comparison:
+`bench/bench.py` is a dual-mode file that runs as plain Python and compiles with nathra. `bench/run.py` builds the binary with `-O2`, runs both, and prints a comparison:
 
 ```
 benchmark             python ms    nathra ms   speedup
@@ -53,14 +53,14 @@ The native compiler is written in nathra and compiles itself. Self-compilation b
 
 | Module | Python | Native | Speedup |
 |--------|--------|--------|---------|
-| native_analysis.nth | 139 ms | 0.22 ms | 624x |
-| native_compile_file.nth | 637 ms | 1.25 ms | 511x |
-| native_infer.nth | 147 ms | 0.27 ms | 540x |
-| native_type_map.nth | 144 ms | 0.33 ms | 436x |
-| native_codegen_stmt.nth | 383 ms | 1.04 ms | 367x |
-| native_codegen_call.nth | 311 ms | 0.94 ms | 331x |
-| native_codegen_expr.nth | 225 ms | 0.78 ms | 287x |
-| native_compiler_state.nth | 43 ms | 0.17 ms | 248x |
+| native_analysis.py | 139 ms | 0.22 ms | 624x |
+| native_compile_file.py | 637 ms | 1.25 ms | 511x |
+| native_infer.py | 147 ms | 0.27 ms | 540x |
+| native_type_map.py | 144 ms | 0.33 ms | 436x |
+| native_codegen_stmt.py | 383 ms | 1.04 ms | 367x |
+| native_codegen_call.py | 311 ms | 0.94 ms | 331x |
+| native_codegen_expr.py | 225 ms | 0.78 ms | 287x |
+| native_compiler_state.py | 43 ms | 0.17 ms | 248x |
 | **Total** | **2,029 ms** | **5.01 ms** | **405x** |
 
 The native compiler compiles ~4,000 lines of its own source in 5 milliseconds. Total compile time becomes dominated by `gcc`, which is the correct steady state — the compiler should never be slower than the C compiler it feeds.
@@ -97,12 +97,12 @@ nathra/
     nathra_types.h                   Forward declarations — safe to include from any header
     nathra_test.h                    Test runner infrastructure
   native/                           Bootstrap native compiler (405x faster)
-    src/                              .nth source for the native compiler
+    src/                              .py source for the native compiler
     generated/                        Pre-generated .c/.h — just run make
   lib/
     build.py                          Build script interpreter
   scripts/
-    regenerate.py                     Regenerate native/generated/ from .nth sources
+    regenerate.py                     Regenerate native/generated/ from .py sources
     bootstrap_test.py                 Bootstrap verification
   build/                            Build artifacts (gitignored)
     compiler_native.dylib             Native compiler shared library
@@ -115,7 +115,7 @@ nathra/
 
 ```sh
 make                    # build native compiler from pre-generated C (~2 sec)
-make regenerate         # regenerate C from .nth sources (needs Python compiler)
+make regenerate         # regenerate C from .py sources (needs Python compiler)
 make test               # run the test suite
 make bootstrap          # run bootstrap verification
 make clean              # remove build artifacts

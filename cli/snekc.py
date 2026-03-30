@@ -171,7 +171,7 @@ class ReplState:
     # ------------------------------------------------------------------
 
     def generate_mpy(self):
-        """Build the complete .nth source from accumulated state."""
+        """Build the complete .py source from accumulated state."""
         parts = []
 
         # Struct definitions
@@ -209,11 +209,11 @@ class ReplState:
             return
 
         mpy_source = self.generate_mpy()
-        mpy_path = os.path.join(self.tmpdir, "_repl.nth")
+        mpy_path = os.path.join(self.tmpdir, "_repl.py")
         with open(mpy_path, "w") as f:
             f.write(mpy_source)
 
-        # Compile .nth → .c
+        # Compile .py → .c
         compiler = Compiler(
             source_dir=self.tmpdir,
             platform="all",

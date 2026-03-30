@@ -1082,7 +1082,7 @@ class StmtMixin:
         if hasattr(node, 'lineno'):
             self._current_line = node.lineno
             if self._current_file and self.emit_line_directives:
-                # Emit #line directive so C compiler errors point to .nth source
+                # Emit #line directive so C compiler errors point to .py source
                 self.lines.append(f'#line {node.lineno} "{self._current_file}"')
         if isinstance(node, ast.AnnAssign):
             self.compile_ann_assign(node)

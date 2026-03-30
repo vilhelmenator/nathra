@@ -304,7 +304,7 @@ Items marked ✅ are already implemented.
 The compiler has full knowledge of every struct's field types, nesting, and pointer
 relationships at compile time. Use this to generate bespoke serialize/deserialize
 functions per struct — no runtime reflection, no external schema files, no separate
-`.fbs` or `.proto` to maintain. The `.nth` source is the schema.
+`.fbs` or `.proto` to maintain. The `.py` source is the schema.
 
 ### Phase 1 — Byte buffer primitives (`nathra_rt.h`)
 
@@ -486,11 +486,11 @@ receive the generated C and return the final output.
 
 ### How it works
 
-1. User creates a `codegen_hooks.py` (or any `.py` file) next to their `.nth`
+1. User creates a `codegen_hooks.py` (or any `.py` file) next to their `.py`
    source. This file contains plain Python functions that return decorator
    callbacks.
 
-2. The `.nth` file imports and uses the decorator:
+2. The `.py` file imports and uses the decorator:
 
    ```python
    from codegen_hooks import sierra_study
@@ -608,11 +608,11 @@ uses existing decorator and import mechanisms.
   as a native `.dylib` called from Python via ctypes. Binary AST serialization
   hands off the tree; native code returns generated C. Python retains only
   `ast.parse` and the system C compiler invocation.
-- **Performance.** Native compile of a 1,000-line `.nth` module: 0.91 ms
+- **Performance.** Native compile of a 1,000-line `.py` module: 0.91 ms
   (vs 102.5 ms in Python). 112× speedup. The compiler is now invisible in
   the pipeline — gcc dominates total build time.
 - **Codegen hooks.** Compile-time decorator hooks allow domain-specific
-  wrappers (e.g. Sierra Chart ACSIL studies) without polluting `.nth` source.
+  wrappers (e.g. Sierra Chart ACSIL studies) without polluting `.py` source.
 
 Bootstrap test parity with the Python compiler is the immediate priority —
 a handful of tests still diverge.
@@ -855,7 +855,7 @@ deref(p)                        # ERROR: dereference of provably null pointer
 ```
 
 ```
-sma_study.nth:12: error: dereference of provably null pointer 'p'
+sma_study.py:12: error: dereference of provably null pointer 'p'
     note: assigned None at line 11
 ```
 
@@ -967,22 +967,22 @@ wrapper — it checks both `b == 0` and the `MIN / -1` edge case.
 
 ### Error messages
 
-All safety handlers print the `.nth` source file and line (via `#line`
+All safety handlers print the `.py` source file and line (via `#line`
 directives already emitted by the compiler), not the generated C location:
 
 ```
-sma_study.nth:42: division by zero
-sma_study.nth:17: null pointer dereference
-sma_study.nth:31: index 64 out of bounds (size 64)
-sma_study.nth:55: integer overflow in multiplication
+sma_study.py:42: division by zero
+sma_study.py:17: null pointer dereference
+sma_study.py:31: index 64 out of bounds (size 64)
+sma_study.py:55: integer overflow in multiplication
 ```
 
 ### CLI
 
 ```sh
-python3 cli/nathra.py program.nth --safe              # enable all safety checks
-python3 cli/nathra.py program.nth --safe --run        # safe + run
-python3 cli/nathra.py program.nth                     # release: no checks (default)
+python3 cli/nathra.py program.py --safe              # enable all safety checks
+python3 cli/nathra.py program.py --safe --run        # safe + run
+python3 cli/nathra.py program.py                     # release: no checks (default)
 ```
 
 The `--safe` flag can be combined with `--flags="-O2"` — the checks are
@@ -1041,10 +1041,10 @@ so this directly controls the final binary layout without needing a link-time
 order file.
 
 **Report.** `--call-graph` flag emits a report showing the suggested ordering
-and the heaviest edges, so you can reorganize your `.nth` source to match:
+and the heaviest edges, so you can reorganize your `.py` source to match:
 
 ```
-call graph: native_codegen_stmt.nth
+call graph: native_codegen_stmt.py
   compile_stmt ↔ compile_expr        weight: 450
   compile_stmt ↔ compile_assign      weight: 120
   compile_expr ↔ compile_call        weight: 380
@@ -1287,5 +1287,5 @@ and header are compiled out — zero overhead.
 a cold abort handler with file/line on mismatch:
 
 ```
-sma_study.nth:47: heap assertion failed: expected 0 bytes allocated, found 128
+sma_study.py:47: heap assertion failed: expected 0 bytes allocated, found 128
 ```

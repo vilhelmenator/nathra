@@ -11,7 +11,7 @@ You need two files in your project directory:
 ```
 my_studies/
 ├── codegen_hooks.py   ← Sierra Chart wrapper (copy once, edit as needed)
-├── sma_study.nth      ← your indicator logic
+├── sma_study.py      ← your indicator logic
 └── nathra_rt.h       ← symlink or copy from nathra repo
 ```
 
@@ -59,7 +59,7 @@ to pass data from Sierra Chart into your function.
 
 ## Step 2: Write your study
 
-Create `sma_study.nth`:
+Create `sma_study.py`:
 
 ```python
 from codegen_hooks import sierra_study
@@ -74,12 +74,12 @@ def sma(close: ptr[f32], count: i32, output: ptr[f32]) -> void:
         output[i] = total / cast(f32, period)
 ```
 
-That's it. Pure math, no Sierra boilerplate in your `.nth` file.
+That's it. Pure math, no Sierra boilerplate in your `.py` file.
 
 ## Step 3: Compile
 
 ```bash
-python nathra.py sma_study.nth --shared
+python nathra.py sma_study.py --shared
 ```
 
 This produces `sma_study.c` and compiles it to a shared library
@@ -119,7 +119,7 @@ Copy the DLL into Sierra Chart's `Data/` folder and add it as a study.
 
 ## Multiple studies in one file
 
-You can have multiple studies in a single `.nth` file:
+You can have multiple studies in a single `.py` file:
 
 ```python
 from codegen_hooks import sierra_study

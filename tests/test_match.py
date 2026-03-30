@@ -1,0 +1,102 @@
+"nathra"
+class Color:
+    RED = 0
+    GREEN = 1
+    BLUE = 2
+
+
+@test
+def test_match_int_switch() -> void:
+    x: int = 2
+    result: int = 0
+    match x:
+        case 1:
+            result = 10
+        case 2:
+            result = 20
+        case 3:
+            result = 30
+        case _:
+            result = -1
+    test_assert(result == 20)
+
+
+@test
+def test_match_default() -> void:
+    x: int = 99
+    result: int = 0
+    match x:
+        case 1:
+            result = 1
+        case 2:
+            result = 2
+        case _:
+            result = -1
+    test_assert(result == -1)
+
+
+@test
+def test_match_or_pattern() -> void:
+    x: int = 3
+    result: int = 0
+    match x:
+        case 1 | 2:
+            result = 12
+        case 3 | 4:
+            result = 34
+        case _:
+            result = 0
+    test_assert(result == 34)
+
+
+@test
+def test_match_enum() -> void:
+    c: Color = Color.GREEN
+    name: int = -1
+    match c:
+        case 0:
+            name = 0
+        case 1:
+            name = 1
+        case 2:
+            name = 2
+    test_assert(name == 1)
+
+
+@test
+def test_match_guard() -> void:
+    x: int = 7
+    result: int = 0
+    match x:
+        case n if n < 0:
+            result = -1
+        case n if n == 0:
+            result = 0
+        case n if n > 0:
+            result = 1
+    test_assert(result == 1)
+
+
+@test
+def test_match_no_default_falls_through() -> void:
+    x: int = 5
+    result: int = 42
+    match x:
+        case 1:
+            result = 1
+        case 2:
+            result = 2
+    test_assert(result == 42)
+
+
+@test
+def test_match_cold_arm_ordering() -> void:
+    # raise arm reordered to end of if/else chain (guards force if/else path)
+    x: int = 2
+    result: int = 0
+    match x:
+        case n if n == 1:
+            raise "unexpected"
+        case n if n == 2:
+            result = 99
+    test_assert(result == 99)
