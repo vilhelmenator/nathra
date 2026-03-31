@@ -237,6 +237,20 @@ def build_once(args, source_dir) -> bool:
         print(f"Internal error at {loc}: {type(e).__name__}: {e}", file=sys.stderr)
         return False
 
+    # --dump-topology: run topology analysis and exit
+    if getattr(args, 'dump_topology', False):
+        from compiler.topology import TopologyAnalyzer
+        topo = TopologyAnalyzer()
+        topo.add_module("__main__", compiler)
+        topo.add_call_edges(compiler, "__main__")
+        # Add dependency modules
+        for dep_name in compiler.compiled_files:
+            if dep_name != "__main__" and dep_name in compiler.modules:
+                topo.add_module(dep_name, compiler)
+        report = topo.analyze()
+        report.print(file=sys.stdout)
+        return True
+
     base = os.path.splitext(args.source)[0]
     c_path = base + ".c"
     with open(c_path, "w") as f:
@@ -338,6 +352,8 @@ def main():
     parser.add_argument("--c-module", action="append", default=[],
                         metavar="NAME=HEADER",
                         help='Map import name to C header(s): --c-module "glut=<GLUT/glut.h>,<OpenGL/gl.h>"')
+    parser.add_argument("--dump-topology", action="store_true",
+                        help="Analyze and print build topology report")
     args = parser.parse_args()
 
     # Route build.py to the build system
