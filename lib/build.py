@@ -77,6 +77,8 @@ class BuildRunner:
         self.platform = platform
         self.targets: List[BuildTarget] = []
         self.is_msvc = cc in ("cl", "cl.exe")
+        self._topology_pins: list = []    # [(name, name, ...), ...]
+        self._topology_keeps: set = set() # module names to keep_alive
 
     # -- DSL surface ---------------------------------------------------------
 
@@ -101,6 +103,14 @@ class BuildRunner:
             flags=flags or [], libs=libs or [],
             c_modules=c_modules or {},
         ))
+
+    def pin_together(self, *names: str):
+        """Force modules/functions into the same shared library cluster."""
+        self._topology_pins.append(names)
+
+    def keep_alive(self, name: str):
+        """Mark a module as non-swappable (pinned into the host)."""
+        self._topology_keeps.add(name)
 
     # -- Execution -----------------------------------------------------------
 
@@ -300,6 +310,202 @@ class BuildRunner:
         self._run_cmd(cmd, f"Link shared {target.name}")
         print(f"  => {out}")
 
+    # -- Topology-aware build ------------------------------------------------
+
+    def build_with_topology(self, target: BuildTarget,
+                             mode: str = "dev"):
+        """Build a target using topology-driven .so partitioning.
+
+        Args:
+            target: Build target to compile
+            mode: "dev" (hot-swap), "release" (static LTO), or "service"
+        """
+        from compiler.topology import TopologyAnalyzer, BuildMode
+
+        build_mode = BuildMode(mode)
+
+        print(f"\n==> topology build: {target.name}")
+
+        # Step 1: Compile all sources, keep compiler instances
+        compilers = {}  # module_name → compiler
+        c_files_by_module = {}  # module_name → c_path
+        _plat = _detect_platform()
+        _resolved_mods = _resolve_c_modules(target.c_modules, _plat)
+        compiled_files = set()
+
+        for src in target.sources:
+            src_path = os.path.join(self.build_dir, src)
+            base = os.path.splitext(src_path)[0]
+            c_path = base + ".c"
+            module_name = (
+                "__main__" if target.kind == "exe" and src == target.sources[0]
+                else os.path.splitext(os.path.basename(src))[0]
+            )
+
+            compiler = Compiler(
+                compiled_files=compiled_files,
+                source_dir=self.build_dir,
+                platform=self.platform,
+                c_modules=_resolved_mods,
+            )
+            try:
+                c_src, h_src, mod_info = compiler.compile_file(src_path, module_name)
+            except Exception as e:
+                print(f"Error compiling {src}: {e}", file=sys.stderr)
+                sys.exit(1)
+
+            compiled_files = compiler.compiled_files
+            compilers[module_name] = compiler
+            c_files_by_module[module_name] = c_path
+
+            with open(c_path, "w") as f:
+                f.write(c_src)
+            if module_name != "__main__":
+                h_path = base + ".h"
+                with open(h_path, "w") as f:
+                    f.write(h_src)
+
+            # Collect dependency .c files
+            for dep in compiler.compiled_files:
+                dep_c = os.path.join(self.build_dir, f"{dep}.c")
+                if os.path.exists(dep_c) and dep not in c_files_by_module:
+                    c_files_by_module[dep] = dep_c
+
+            print(f"  Compiled {src} -> {os.path.basename(c_path)}")
+
+        # Step 2: Run topology analysis
+        topo = TopologyAnalyzer()
+        for mod_name, comp in compilers.items():
+            topo.add_module(mod_name, comp)
+            topo.add_call_edges(comp, mod_name)
+
+        # Step 3: Apply overrides
+        for names in self._topology_pins:
+            topo.pin_together(*names)
+        for name in self._topology_keeps:
+            topo.keep_alive(name)
+
+        report = topo.analyze()
+        plan = topo.generate_build_plan(
+            report,
+            source_dir=self.build_dir,
+            host_name=target.name,
+            mode=build_mode,
+        )
+
+        # Print reports
+        report.print(file=sys.stdout)
+        plan.print(file=sys.stdout)
+
+        # Step 4: Generate dispatch header if needed
+        dispatch_h = plan.generate_dispatch_header()
+        if dispatch_h:
+            dispatch_path = os.path.join(self.build_dir, "nathra_dispatch.h")
+            with open(dispatch_path, "w") as f:
+                f.write(dispatch_h)
+            print(f"  Generated {dispatch_path}")
+
+            dispatch_c = plan.generate_dispatch_impl()
+            dispatch_c_path = os.path.join(self.build_dir, "nathra_dispatch.c")
+            with open(dispatch_c_path, "w") as f:
+                f.write(dispatch_c)
+
+        from compiler.topology import BuildMode, Reloadability
+
+        # ── RELEASE MODE: single static binary with LTO ──
+        if build_mode == BuildMode.RELEASE:
+            all_c = [c_files_by_module[m] for m in c_files_by_module]
+            out = os.path.join(self.build_dir, target.name)
+            lto_flags = ["-flto", "-O2"]
+            cmd = [self.cc] + all_c + ["-o", out, "-lm"] + \
+                  lto_flags + target.flags
+            self._run_cmd(cmd, f"Link release {target.name}")
+            print(f"  => {out}  (static, LTO)")
+            return
+
+        # ── DEV / SERVICE MODE: .so per cluster with hot-swap ──
+
+        # Step 5: Generate reload init
+        reload_init = plan.generate_reload_init()
+        if reload_init:
+            init_path = os.path.join(self.build_dir, "nathra_reload_init.c")
+            with open(init_path, "w") as f:
+                f.write(reload_init)
+            print(f"  Generated {init_path}")
+
+        # Step 6: Generate state migration stubs (service mode)
+        if build_mode == BuildMode.SERVICE:
+            stubs = plan.generate_state_migration_stubs()
+            if stubs:
+                stubs_path = os.path.join(self.build_dir,
+                                           "nathra_state_migration.c")
+                with open(stubs_path, "w") as f:
+                    f.write(stubs)
+                print(f"  Generated {stubs_path}")
+
+        # Step 7: Link each cluster as a .so
+        ext = "dylib" if sys.platform == "darwin" else (
+            "dll" if sys.platform == "win32" else "so")
+
+        # Stricter flags for swappable modules
+        _strict_flags = ["-DNR_SAFE", "-Wall", "-Werror",
+                         "-Wno-unused-variable", "-Wno-unused-function"]
+
+        for lib in plan.shared_libs:
+            if lib.cluster_id == plan.pinned_cluster:
+                continue  # pinned cluster goes into the host exe
+
+            existing_c = [c_files_by_module[m]
+                          for m in lib.modules
+                          if m in c_files_by_module]
+            if not existing_c:
+                continue
+
+            out = os.path.join(self.build_dir, f"lib{lib.name}.{ext}")
+            swappable = lib.reloadability in (Reloadability.PURE,
+                                               Reloadability.PROCESS_LOCAL)
+            extra = _strict_flags if swappable else []
+
+            # Service mode: embed ABI hash in abi-anchor .so's
+            if build_mode == BuildMode.SERVICE and lib.abi_hash:
+                extra += [f"-DNR_ABI_HASH=0x{lib.abi_hash:08x}"]
+
+            cmd = [self.cc, "-shared", "-fPIC"] + existing_c + \
+                  ["-o", out, "-lm"] + extra + target.flags
+            self._run_cmd(cmd, f"Link shared {lib.name}")
+            swap_str = "(swappable)" if swappable else "(pinned)"
+            print(f"  => {out}  {swap_str}")
+
+        # Step 8: Link host exe
+        host_c = []
+        if plan.pinned_cluster >= 0:
+            pinned_lib = plan.shared_libs[plan.pinned_cluster]
+            host_c = [c_files_by_module[m]
+                      for m in pinned_lib.modules
+                      if m in c_files_by_module]
+        else:
+            if "__main__" in c_files_by_module:
+                host_c = [c_files_by_module["__main__"]]
+
+        if dispatch_h:
+            dispatch_c_path = os.path.join(self.build_dir, "nathra_dispatch.c")
+            if os.path.exists(dispatch_c_path):
+                host_c.append(dispatch_c_path)
+        if reload_init:
+            host_c.append(init_path)
+
+        if host_c:
+            out = os.path.join(self.build_dir, target.name)
+            lib_flags = []
+            for lib in plan.shared_libs:
+                if lib.cluster_id != plan.pinned_cluster:
+                    lib_flags += [f"-L{self.build_dir}", f"-l{lib.name}"]
+            dl_flag = [] if sys.platform == "win32" else ["-ldl"]
+            cmd = [self.cc] + host_c + ["-o", out, "-lm"] + \
+                  dl_flag + target.flags + lib_flags
+            self._run_cmd(cmd, f"Link host {target.name}")
+            print(f"  => {out}")
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -319,6 +525,8 @@ def run_build_file(build_path: str, cc: str = "gcc", platform: str = "all"):
     ns = {
         "exe": runner.exe,
         "lib": runner.lib,
+        "pin_together": runner.pin_together,
+        "keep_alive": runner.keep_alive,
     }
 
     with open(build_path) as f:

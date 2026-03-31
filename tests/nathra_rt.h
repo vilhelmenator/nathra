@@ -88,85 +88,6 @@ static inline void _nr_alloc_assert_zero(void) {
 #  define _nr_alloc_assert_zero() ((void)0)
 #endif
 
-/* -------------------------------------------------------------------------
- * Heap memory assertions — active under NR_SAFE or NR_TRACK_ALLOC.
- *
- * Wraps malloc/free with a size header to track total live bytes.
- * Provides heap_allocated(), heap_assert(), heap_assert_delta() for
- * verifying that code paths don't leak.
- *
- * In release builds everything compiles to no-ops / direct malloc/free.
- * ------------------------------------------------------------------------- */
-#if defined(NR_SAFE) || defined(NR_TRACK_ALLOC)
-static int64_t _nr_heap_bytes = 0;
-
-static inline void* _nr_tracked_alloc(size_t n) {
-    size_t* blk = (size_t*)malloc(sizeof(size_t) + n);
-    if (!blk) return NULL;
-    blk[0] = n;
-    _nr_heap_bytes += (int64_t)n;
-    return (void*)(blk + 1);
-}
-
-static inline void _nr_tracked_free(void* p) {
-    if (!p) return;
-    size_t* blk = ((size_t*)p) - 1;
-    _nr_heap_bytes -= (int64_t)blk[0];
-    free(blk);
-}
-
-static inline void* _nr_tracked_realloc(void* p, size_t new_n) {
-    size_t old_n = 0;
-    size_t* old_blk = NULL;
-    if (p) {
-        old_blk = ((size_t*)p) - 1;
-        old_n = old_blk[0];
-    }
-    size_t* blk = (size_t*)realloc(old_blk, sizeof(size_t) + new_n);
-    if (!blk) return NULL;
-    _nr_heap_bytes += (int64_t)new_n - (int64_t)old_n;
-    blk[0] = new_n;
-    return (void*)(blk + 1);
-}
-
-static inline int64_t nr_heap_allocated(void) { return _nr_heap_bytes; }
-
-__attribute__((cold, noreturn))
-static void _nr_heap_assert_fail(int64_t expected, int64_t actual,
-                                  const char* file, int line) {
-    fprintf(stderr, "%s:%d: heap assertion failed: expected %lld bytes, found %lld\n",
-            file, line, (long long)expected, (long long)actual);
-    abort();
-}
-
-static inline void nr_heap_assert(int64_t expected, const char* file, int line) {
-    if (_nr_heap_bytes != expected)
-        _nr_heap_assert_fail(expected, _nr_heap_bytes, file, line);
-}
-
-static inline void nr_heap_assert_delta(int64_t snap, int64_t expected_delta,
-                                         const char* file, int line) {
-    int64_t actual_delta = _nr_heap_bytes - snap;
-    if (actual_delta != expected_delta)
-        _nr_heap_assert_fail(expected_delta, actual_delta, file, line);
-}
-
-/* Redefine allocators to use tracked versions.
- * If NATHRA_DEBUG is also active, debug wrappers call the real malloc/free
- * which are already overridden above, so we layer tracking ON TOP of debug. */
-#ifndef NATHRA_DEBUG
-#  define malloc(n)      _nr_tracked_alloc(n)
-#  define free(p)        _nr_tracked_free(p)
-#  define realloc(p, n)  _nr_tracked_realloc((p), (n))
-#endif
-
-#else
-/* Release builds — no tracking overhead */
-static inline int64_t nr_heap_allocated(void) { return 0; }
-#define nr_heap_assert(expected, file, line) ((void)0)
-#define nr_heap_assert_delta(snap, delta, file, line) ((void)0)
-#endif
-
 static inline NrVal nr_val_int(int64_t v) { NrVal r; memcpy(&r, &v, 8); return r; }
 static inline NrVal nr_val_float(double v) { NrVal r; memcpy(&r, &v, 8); return r; }
 static inline int64_t nr_as_int(NrVal v) { int64_t r; memcpy(&r, &v, 8); return r; }
@@ -1080,6 +1001,131 @@ static inline void hotreload_close(void* lib) {
     if (lib) FreeLibrary((HMODULE)lib);
 }
 #endif
+
+/* ---- Topology-aware reload manager ---- */
+
+/* A loaded cluster — tracks the .so handle and its registration function */
+typedef struct {
+    const char* name;         /* cluster name (e.g. "renderer") */
+    const char* path;         /* path to .so/.dylib/.dll */
+    void* handle;             /* dlopen handle */
+    int64_t load_time;        /* timestamp of last load */
+    int32_t generation;       /* reload generation counter */
+    int32_t reloadable;       /* 1 if swappable, 0 if pinned */
+} NrCluster;
+
+/* Reload manager — owns all loaded clusters */
+typedef struct {
+    NrCluster* clusters;
+    int32_t count;
+    int32_t cap;
+} NrReloadManager;
+
+static inline NrReloadManager nr_reload_manager_new(int32_t cap) {
+    NrReloadManager rm;
+    rm.clusters = (NrCluster*)calloc(cap, sizeof(NrCluster));
+    rm.count = 0;
+    rm.cap = cap;
+    return rm;
+}
+
+static inline void nr_reload_manager_free(NrReloadManager* rm) {
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (rm->clusters[i].handle) {
+            hotreload_close(rm->clusters[i].handle);
+        }
+    }
+    free(rm->clusters);
+    rm->clusters = NULL;
+    rm->count = 0;
+}
+
+/* Register a cluster (called once at startup per .so) */
+static inline int32_t nr_reload_register(NrReloadManager* rm,
+                                          const char* name,
+                                          const char* path,
+                                          int32_t reloadable) {
+    if (rm->count >= rm->cap) return -1;
+    int32_t id = rm->count++;
+    rm->clusters[id].name = name;
+    rm->clusters[id].path = path;
+    rm->clusters[id].handle = NULL;
+    rm->clusters[id].load_time = 0;
+    rm->clusters[id].generation = 0;
+    rm->clusters[id].reloadable = reloadable;
+    return id;
+}
+
+/* Load a cluster's .so and call its registration function.
+   The register_fn_name should be "nr_dispatch_register_cluster_N".
+   Returns 0 on success, -1 on failure. */
+static inline int32_t nr_reload_load(NrReloadManager* rm, int32_t id) {
+    if (id < 0 || id >= rm->count) return -1;
+    NrCluster* cl = &rm->clusters[id];
+
+    /* Close existing handle if reloading */
+    if (cl->handle) {
+        hotreload_close(cl->handle);
+        cl->handle = NULL;
+    }
+
+    cl->handle = hotreload_open(cl->path);
+    if (!cl->handle) {
+        fprintf(stderr, "nr_reload: failed to load %s (%s)\n",
+                cl->name, cl->path);
+        return -1;
+    }
+
+    /* Look for and call the dispatch registration function */
+    char reg_name[128];
+    snprintf(reg_name, sizeof(reg_name),
+             "nr_dispatch_register_cluster_%d", id);
+    void (*reg_fn)(void) = (void(*)(void))hotreload_sym(cl->handle, reg_name);
+    if (reg_fn) {
+        reg_fn();
+    }
+
+    cl->generation++;
+    cl->load_time = (int64_t)time(NULL);
+    return 0;
+}
+
+/* Reload a cluster if it is swappable. Returns 0 on success, -1 on error,
+   1 if the cluster is pinned and cannot be reloaded. */
+static inline int32_t nr_reload(NrReloadManager* rm, int32_t id) {
+    if (id < 0 || id >= rm->count) return -1;
+    if (!rm->clusters[id].reloadable) {
+        fprintf(stderr, "nr_reload: cluster '%s' is pinned (non-swappable)\n",
+                rm->clusters[id].name);
+        return 1;
+    }
+    return nr_reload_load(rm, id);
+}
+
+/* Reload a cluster by name. Returns 0 on success. */
+static inline int32_t nr_reload_by_name(NrReloadManager* rm,
+                                         const char* name) {
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (strcmp(rm->clusters[i].name, name) == 0) {
+            return nr_reload(rm, i);
+        }
+    }
+    fprintf(stderr, "nr_reload: cluster '%s' not found\n", name);
+    return -1;
+}
+
+/* Reload all swappable clusters. Returns number of failures. */
+static inline int32_t nr_reload_all(NrReloadManager* rm) {
+    int32_t failures = 0;
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (rm->clusters[i].reloadable) {
+            if (nr_reload_load(rm, i) != 0) {
+                failures++;
+            }
+        }
+    }
+    return failures;
+}
 
 /* ---- Binary I/O (NrWriter / NrReader) ---- */
 

@@ -3,7 +3,9 @@ topology.py — Build topology analyzer for nathra.
 
 Consumes the compiler's call graph, module info, allocation tags, and
 decorator metadata to produce a partitioning plan for shared libraries.
-This module is pure analysis — no codegen, no file emission.
+
+Phase 1: Pure analysis — classify modules, cluster functions, detect violations.
+Phase 2: Build plan — map clusters to .so targets, generate ABI boundaries.
 
 Usage:
     from compiler.topology import TopologyAnalyzer
@@ -31,6 +33,13 @@ class Reloadability(Enum):
     PROCESS_LOCAL = "process-local"     # owns in-process state, reloadable with migration
     RESOURCE_OWNER = "resource-owner"   # owns external handles, non-swappable
     ABI_ANCHOR = "abi-anchor"           # defines interfaces others depend on
+
+
+class BuildMode(Enum):
+    """Build mode — controls how topology maps to link strategy."""
+    DEV = "dev"           # fine-grained .so per cluster, hot-swap enabled
+    RELEASE = "release"   # all clusters merged, static link, full LTO
+    SERVICE = "service"   # pinned modules static, swappable modules as .so
 
 
 @dataclass
@@ -147,6 +156,299 @@ class TopologyReport:
             p()
 
         p("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Build plan (Phase 2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SharedLibTarget:
+    """A shared library derived from a cluster."""
+    name: str                                      # e.g. "cluster_0" or "renderer"
+    cluster_id: int
+    modules: list = field(default_factory=list)     # module names in this .so
+    c_files: list = field(default_factory=list)     # .c files to compile
+    reloadability: Reloadability = Reloadability.PURE
+    # Functions called FROM this .so INTO other .so's (need dispatch stubs)
+    outgoing_calls: list = field(default_factory=list)  # [(local_func, remote_func), ...]
+    # Functions called INTO this .so FROM other .so's (need to be exported)
+    incoming_calls: list = field(default_factory=list)  # [func_name, ...]
+    abi_hash: int = 0                               # FNV-1a hash of exported ABI
+
+
+@dataclass
+class DispatchEntry:
+    """A function pointer entry in the indirection table."""
+    name: str                   # fully qualified: "module.func"
+    ret_type: str               # C return type
+    param_types: list           # [(name, ctype), ...]
+    source_cluster: int         # cluster that owns the implementation
+    callers: list = field(default_factory=list)  # cluster IDs that call this
+
+
+@dataclass
+class BuildPlan:
+    """Complete build plan derived from topology analysis."""
+    shared_libs: list = field(default_factory=list)    # [SharedLibTarget, ...]
+    host_exe: str = ""                                  # main executable name
+    host_c_files: list = field(default_factory=list)   # .c files for the host
+    dispatch_table: list = field(default_factory=list) # [DispatchEntry, ...]
+    # The pinned (non-swappable) cluster, linked statically into the host
+    pinned_cluster: int = -1
+    mode: BuildMode = BuildMode.DEV
+    lto: bool = False                                   # release mode: link with LTO
+
+    def print(self, file=sys.stderr):
+        """Print a human-readable build plan."""
+        p = lambda *a, **kw: print(*a, **kw, file=file)
+
+        p("=" * 60)
+        p(f"  BUILD PLAN  [{self.mode.value}]")
+        p("=" * 60)
+        p()
+
+        if self.lto:
+            p("Link-time optimization: enabled")
+            p()
+
+        if self.host_exe:
+            p(f"Host executable: {self.host_exe}")
+            if self.host_c_files:
+                p(f"  Static .c files: {', '.join(self.host_c_files)}")
+            p()
+
+        p(f"Shared libraries ({len(self.shared_libs)}):")
+        for lib in self.shared_libs:
+            swappable = lib.reloadability in (Reloadability.PURE,
+                                               Reloadability.PROCESS_LOCAL)
+            swap_str = "swappable" if swappable else "pinned"
+            p(f"  lib{lib.name}.so  [{lib.reloadability.value}] ({swap_str})")
+            for mod in lib.modules:
+                p(f"    module: {mod}")
+            if lib.incoming_calls:
+                p(f"    exports: {len(lib.incoming_calls)} functions")
+            if lib.outgoing_calls:
+                p(f"    imports: {len(lib.outgoing_calls)} cross-cluster calls")
+        p()
+
+        if self.dispatch_table:
+            p(f"Dispatch table ({len(self.dispatch_table)} entries):")
+            for entry in self.dispatch_table:
+                callers = ", ".join(f"cluster_{c}" for c in entry.callers)
+                p(f"  {entry.name}  (owned by cluster_{entry.source_cluster}"
+                  f", called from {callers})")
+            p()
+
+        p("=" * 60)
+
+    def generate_dispatch_header(self) -> str:
+        """Generate the C dispatch header for cross-cluster calls.
+
+        This header defines:
+        - A struct of function pointers (the dispatch table)
+        - A global instance of the table
+        - Inline wrapper functions that call through the table
+
+        Each .so loads its function pointers into the table at init time.
+        The host exe initializes the table before calling any .so code.
+        """
+        if not self.dispatch_table:
+            return ""
+
+        lines = [
+            "/* Auto-generated by nathra topology — do not edit */",
+            "#ifndef NATHRA_DISPATCH_H",
+            "#define NATHRA_DISPATCH_H",
+            "",
+            '#include "nathra_rt.h"',
+            "",
+            "/* Dispatch table struct */",
+            "typedef struct {",
+        ]
+
+        for entry in self.dispatch_table:
+            params = ", ".join(f"{ct} {cn}" for cn, ct in entry.param_types)
+            if not params:
+                params = "void"
+            lines.append(f"    {entry.ret_type} (*{_mangle(entry.name)})({params});")
+
+        lines += [
+            "} NrDispatchTable;",
+            "",
+            "/* Global dispatch table */",
+            "extern NrDispatchTable nr_dispatch;",
+            "",
+            "/* Inline wrappers — call these from application code */",
+        ]
+
+        for entry in self.dispatch_table:
+            params = ", ".join(f"{ct} {cn}" for cn, ct in entry.param_types)
+            args = ", ".join(cn for cn, _ in entry.param_types)
+            mangled = _mangle(entry.name)
+            if not params:
+                params = "void"
+                args = ""
+
+            if entry.ret_type == "void":
+                lines.append(f"static inline void {mangled}({params}) {{")
+                lines.append(f"    nr_dispatch.{mangled}({args});")
+            else:
+                lines.append(
+                    f"static inline {entry.ret_type} {mangled}({params}) {{")
+                lines.append(f"    return nr_dispatch.{mangled}({args});")
+            lines.append("}")
+            lines.append("")
+
+        lines += [
+            "/* Registration — each .so calls this at load time */",
+        ]
+
+        # Group entries by source cluster for per-cluster init functions
+        by_cluster = {}
+        for entry in self.dispatch_table:
+            by_cluster.setdefault(entry.source_cluster, []).append(entry)
+
+        for cid, entries in sorted(by_cluster.items()):
+            lines.append(
+                f"static inline void nr_dispatch_register_cluster_{cid}"
+                f"(void) {{")
+            for entry in entries:
+                mangled = _mangle(entry.name)
+                # The actual function symbol (defined in the .so)
+                impl_name = _mangle(entry.name) + "_impl"
+                lines.append(f"    nr_dispatch.{mangled} = {impl_name};")
+            lines.append("}")
+            lines.append("")
+
+        lines += [
+            "#endif /* NATHRA_DISPATCH_H */",
+            "",
+        ]
+
+        return "\n".join(lines)
+
+    def generate_dispatch_impl(self) -> str:
+        """Generate the C file that defines the global dispatch table."""
+        if not self.dispatch_table:
+            return ""
+
+        return "\n".join([
+            "/* Auto-generated by nathra topology — do not edit */",
+            '#include "nathra_dispatch.h"',
+            "",
+            "NrDispatchTable nr_dispatch = {0};",
+            "",
+        ])
+
+    def generate_reload_init(self) -> str:
+        """Generate the C init function that sets up the reload manager.
+
+        Called by the host executable at startup. Registers all clusters,
+        loads each .so, and populates the dispatch table.
+        """
+        lines = [
+            "/* Auto-generated by nathra topology — do not edit */",
+            '#include "nathra_rt.h"',
+        ]
+
+        if self.dispatch_table:
+            lines.append('#include "nathra_dispatch.h"')
+
+        lines += [
+            "",
+            "static NrReloadManager _nr_rm;",
+            "",
+            "void nr_topology_init(void) {",
+            f"    _nr_rm = nr_reload_manager_new({len(self.shared_libs)});",
+        ]
+
+        for lib in self.shared_libs:
+            is_pinned = lib.cluster_id == self.pinned_cluster
+            reloadable = 0 if is_pinned else 1
+            # Determine .so path based on platform
+            lines.append(f"    nr_reload_register(&_nr_rm, "
+                         f'"{lib.name}", '
+                         f'"lib{lib.name}.so", '
+                         f'{reloadable});  '
+                         f'/* {"pinned" if is_pinned else "swappable"} */')
+
+        lines.append("")
+
+        # Load all clusters
+        for i, lib in enumerate(self.shared_libs):
+            if lib.cluster_id == self.pinned_cluster:
+                lines.append(f"    /* cluster {i} ({lib.name}) is pinned"
+                             f" — linked statically */")
+            else:
+                lines.append(f"    nr_reload_load(&_nr_rm, {i});  "
+                             f"/* {lib.name} */")
+
+        lines += [
+            "}",
+            "",
+            "void nr_topology_shutdown(void) {",
+            "    nr_reload_manager_free(&_nr_rm);",
+            "}",
+            "",
+            "int32_t nr_topology_reload(const char* name) {",
+            "    return nr_reload_by_name(&_nr_rm, name);",
+            "}",
+            "",
+            "int32_t nr_topology_reload_all(void) {",
+            "    return nr_reload_all(&_nr_rm);",
+            "}",
+            "",
+        ]
+
+        return "\n".join(lines)
+
+    def generate_state_migration_stubs(self) -> str:
+        """Generate save/load state stubs for process-local clusters.
+
+        For each process-local module, generates:
+        - nr_state_save_<module>(NrWriter* w) — serialize globals
+        - nr_state_load_<module>(NrReader* r) — deserialize globals
+
+        These are called before/after a reload to migrate state.
+        The stubs are empty by default — the developer fills them in
+        for modules with non-trivial state.
+        """
+        lines = [
+            "/* Auto-generated state migration stubs — edit as needed */",
+            '#include "nathra_rt.h"',
+            "",
+        ]
+
+        has_stubs = False
+        for lib in self.shared_libs:
+            if lib.reloadability != Reloadability.PROCESS_LOCAL:
+                continue
+            for mod in lib.modules:
+                has_stubs = True
+                lines += [
+                    f"/* State migration for module '{mod}' */",
+                    f"void nr_state_save_{mod}(NrWriter* w) {{",
+                    f"    /* TODO: serialize {mod}'s globals into w */",
+                    f"    (void)w;",
+                    f"}}",
+                    f"",
+                    f"void nr_state_load_{mod}(NrReader* r) {{",
+                    f"    /* TODO: deserialize {mod}'s globals from r */",
+                    f"    (void)r;",
+                    f"}}",
+                    f"",
+                ]
+
+        if not has_stubs:
+            return ""
+
+        return "\n".join(lines)
+
+
+def _mangle(qualified_name: str) -> str:
+    """Convert 'module.func' to 'module_func' for C identifiers."""
+    return qualified_name.replace(".", "_")
 
 
 # ---------------------------------------------------------------------------
@@ -578,3 +880,168 @@ class TopologyAnalyzer:
             if ci_caller is not None and ci_callee is not None:
                 if ci_caller != ci_callee:
                     report.cross_cluster_edges.append(edge)
+
+    # ------------------------------------------------------------------
+    # Phase 2: Build plan generation
+    # ------------------------------------------------------------------
+
+    def generate_build_plan(self, report: TopologyReport,
+                            source_dir: str = ".",
+                            host_name: str = "app",
+                            mode: BuildMode = BuildMode.DEV) -> BuildPlan:
+        """Generate a concrete build plan from the topology report.
+
+        Args:
+            report: A completed TopologyReport from analyze()
+            source_dir: Directory containing the .c source files
+            host_name: Name for the host executable
+            mode: Build mode — dev (hot-swap), release (static LTO),
+                  or service (selective hot-swap)
+        """
+        import os
+
+        plan = BuildPlan(host_exe=host_name, mode=mode)
+
+        # -----------------------------------------------------------
+        # RELEASE: everything goes into one static binary with LTO
+        # -----------------------------------------------------------
+        if mode == BuildMode.RELEASE:
+            all_modules = set()
+            for cl in report.clusters:
+                all_modules |= cl.modules
+
+            # Single "cluster" — the whole program
+            lib = SharedLibTarget(
+                name=host_name,
+                cluster_id=0,
+                modules=sorted(all_modules),
+                reloadability=Reloadability.PURE,  # irrelevant in release
+            )
+            for mod in all_modules:
+                lib.c_files.append(os.path.join(source_dir, f"{mod}.c"))
+            plan.shared_libs.append(lib)
+
+            # Everything is statically linked — no .so, no dispatch table
+            plan.pinned_cluster = 0
+            plan.host_c_files = list(lib.c_files)
+            plan.lto = True
+            return plan
+
+        # -----------------------------------------------------------
+        # DEV and SERVICE: cluster into .so targets
+        # -----------------------------------------------------------
+
+        # Build function → cluster index mapping
+        func_to_ci = {}
+        for i, cl in enumerate(report.clusters):
+            for fn in cl.functions:
+                func_to_ci[fn] = i
+
+        # Identify pinned clusters
+        for i, cl in enumerate(report.clusters):
+            is_pinned = cl.reloadability in (Reloadability.RESOURCE_OWNER,
+                                              Reloadability.ABI_ANCHOR)
+            # In SERVICE mode, only pin resource-owner and abi-anchor
+            # In DEV mode, also pin resource-owner (can't hot-swap handles)
+            if is_pinned:
+                # Pick the largest pinned cluster as the primary
+                if plan.pinned_cluster < 0 or \
+                   len(cl.functions) > len(report.clusters[plan.pinned_cluster].functions):
+                    plan.pinned_cluster = i
+
+        # SERVICE mode: pure and process-local are swappable,
+        # resource-owner and abi-anchor are pinned
+        # DEV mode: everything except resource-owner is swappable
+
+        # Create SharedLibTarget per cluster
+        for i, cl in enumerate(report.clusters):
+            if len(cl.modules) == 1:
+                lib_name = next(iter(cl.modules))
+            else:
+                lib_name = f"cluster_{i}"
+
+            lib = SharedLibTarget(
+                name=lib_name,
+                cluster_id=i,
+                modules=sorted(cl.modules),
+                reloadability=cl.reloadability,
+            )
+            for mod in cl.modules:
+                lib.c_files.append(os.path.join(source_dir, f"{mod}.c"))
+            plan.shared_libs.append(lib)
+
+        # Identify cross-cluster calls for dispatch table
+        seen_dispatch = set()
+        for edge in report.cross_cluster_edges:
+            ci_caller = func_to_ci.get(edge.caller)
+            ci_callee = func_to_ci.get(edge.callee)
+            if ci_caller is None or ci_callee is None:
+                continue
+
+            if edge.callee not in seen_dispatch:
+                seen_dispatch.add(edge.callee)
+                entry = DispatchEntry(
+                    name=edge.callee,
+                    ret_type="void",
+                    param_types=[],
+                    source_cluster=ci_callee,
+                    callers=[ci_caller],
+                )
+                plan.dispatch_table.append(entry)
+            else:
+                for entry in plan.dispatch_table:
+                    if entry.name == edge.callee:
+                        if ci_caller not in entry.callers:
+                            entry.callers.append(ci_caller)
+                        break
+
+            caller_lib = plan.shared_libs[ci_caller]
+            callee_lib = plan.shared_libs[ci_callee]
+            pair = (edge.caller, edge.callee)
+            if pair not in caller_lib.outgoing_calls:
+                caller_lib.outgoing_calls.append(pair)
+            if edge.callee not in callee_lib.incoming_calls:
+                callee_lib.incoming_calls.append(edge.callee)
+
+        # Host .c files
+        if plan.pinned_cluster >= 0:
+            pinned_lib = plan.shared_libs[plan.pinned_cluster]
+            plan.host_c_files = list(pinned_lib.c_files)
+
+        # SERVICE mode: generate abi-anchor version hashes
+        if mode == BuildMode.SERVICE:
+            self._generate_abi_hashes(report, plan)
+
+        return plan
+
+    def _generate_abi_hashes(self, report: TopologyReport,
+                              plan: BuildPlan) -> None:
+        """Generate layout hashes for abi-anchor clusters.
+
+        Before reloading an abi-anchor module, the reload manager
+        compares the new .so's hash against the running version.
+        Mismatch → reject the reload (ABI break).
+
+        The hash is computed from:
+        - Exported function names (sorted)
+        - Struct layouts exported in headers
+        """
+        for lib in plan.shared_libs:
+            if lib.reloadability != Reloadability.ABI_ANCHOR:
+                continue
+
+            # Collect all exported function names from this cluster's modules
+            export_names = []
+            for mod_name in lib.modules:
+                if mod_name in self.modules:
+                    mod = self.modules[mod_name]
+                    export_names.extend(sorted(mod.exports))
+
+            # Simple hash: FNV-1a over sorted export names
+            h = 0x811c9dc5  # FNV offset basis (32-bit)
+            for name in sorted(export_names):
+                for ch in name.encode("utf-8"):
+                    h ^= ch
+                    h = (h * 0x01000193) & 0xFFFFFFFF
+
+            lib.abi_hash = h

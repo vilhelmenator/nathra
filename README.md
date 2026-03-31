@@ -77,7 +77,7 @@ The compiler emits readable C, invokes `gcc`, and runs the binary. Errors point 
 |------|----------|
 | **Stable** | Types, structs, enums, functions, modules, control flow, C emission, lists, dicts, strings, f-strings, defer, auto-defer, error handling (`Result[T]`), testing framework, build system, native bootstrap compiler |
 | **Implemented** | Safety checks (`--safe`), `@soa`, `@hot`/`@cold`, serialization (`@serializable`), SIMD, concurrency (threads, mutexes, channels), hot-reload, REPL, codegen hooks, `c_import` |
-| **New** | `own[T]` ownership tracking, scoped arenas (`with scope`), heap assertions, `c_modules` build integration |
+| **New** | `own[T]` ownership tracking, scoped arenas (`with scope`), heap assertions, `c_modules` build integration, automatic build topology (dev/release/service modes) |
 
 ## Non-goals
 
@@ -164,3 +164,4 @@ make clean              # remove build artifacts
 - [Language Reference](docs/language.md) — types, structs, functions, memory, modules, concurrency, serialization
 - [Compiler Optimizations & Safety](docs/optimizations.md) — restrict inference, SoA, hot/cold, safety checks
 - [Benchmarks & Project Structure](docs/benchmarks.md) — performance numbers, bootstrap details
+- [Build Topology](docs/topology.md) — automatic .so partitioning, hot-swap, build modes (dev/release/service)

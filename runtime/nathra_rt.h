@@ -1002,6 +1002,131 @@ static inline void hotreload_close(void* lib) {
 }
 #endif
 
+/* ---- Topology-aware reload manager ---- */
+
+/* A loaded cluster — tracks the .so handle and its registration function */
+typedef struct {
+    const char* name;         /* cluster name (e.g. "renderer") */
+    const char* path;         /* path to .so/.dylib/.dll */
+    void* handle;             /* dlopen handle */
+    int64_t load_time;        /* timestamp of last load */
+    int32_t generation;       /* reload generation counter */
+    int32_t reloadable;       /* 1 if swappable, 0 if pinned */
+} NrCluster;
+
+/* Reload manager — owns all loaded clusters */
+typedef struct {
+    NrCluster* clusters;
+    int32_t count;
+    int32_t cap;
+} NrReloadManager;
+
+static inline NrReloadManager nr_reload_manager_new(int32_t cap) {
+    NrReloadManager rm;
+    rm.clusters = (NrCluster*)calloc(cap, sizeof(NrCluster));
+    rm.count = 0;
+    rm.cap = cap;
+    return rm;
+}
+
+static inline void nr_reload_manager_free(NrReloadManager* rm) {
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (rm->clusters[i].handle) {
+            hotreload_close(rm->clusters[i].handle);
+        }
+    }
+    free(rm->clusters);
+    rm->clusters = NULL;
+    rm->count = 0;
+}
+
+/* Register a cluster (called once at startup per .so) */
+static inline int32_t nr_reload_register(NrReloadManager* rm,
+                                          const char* name,
+                                          const char* path,
+                                          int32_t reloadable) {
+    if (rm->count >= rm->cap) return -1;
+    int32_t id = rm->count++;
+    rm->clusters[id].name = name;
+    rm->clusters[id].path = path;
+    rm->clusters[id].handle = NULL;
+    rm->clusters[id].load_time = 0;
+    rm->clusters[id].generation = 0;
+    rm->clusters[id].reloadable = reloadable;
+    return id;
+}
+
+/* Load a cluster's .so and call its registration function.
+   The register_fn_name should be "nr_dispatch_register_cluster_N".
+   Returns 0 on success, -1 on failure. */
+static inline int32_t nr_reload_load(NrReloadManager* rm, int32_t id) {
+    if (id < 0 || id >= rm->count) return -1;
+    NrCluster* cl = &rm->clusters[id];
+
+    /* Close existing handle if reloading */
+    if (cl->handle) {
+        hotreload_close(cl->handle);
+        cl->handle = NULL;
+    }
+
+    cl->handle = hotreload_open(cl->path);
+    if (!cl->handle) {
+        fprintf(stderr, "nr_reload: failed to load %s (%s)\n",
+                cl->name, cl->path);
+        return -1;
+    }
+
+    /* Look for and call the dispatch registration function */
+    char reg_name[128];
+    snprintf(reg_name, sizeof(reg_name),
+             "nr_dispatch_register_cluster_%d", id);
+    void (*reg_fn)(void) = (void(*)(void))hotreload_sym(cl->handle, reg_name);
+    if (reg_fn) {
+        reg_fn();
+    }
+
+    cl->generation++;
+    cl->load_time = (int64_t)time(NULL);
+    return 0;
+}
+
+/* Reload a cluster if it is swappable. Returns 0 on success, -1 on error,
+   1 if the cluster is pinned and cannot be reloaded. */
+static inline int32_t nr_reload(NrReloadManager* rm, int32_t id) {
+    if (id < 0 || id >= rm->count) return -1;
+    if (!rm->clusters[id].reloadable) {
+        fprintf(stderr, "nr_reload: cluster '%s' is pinned (non-swappable)\n",
+                rm->clusters[id].name);
+        return 1;
+    }
+    return nr_reload_load(rm, id);
+}
+
+/* Reload a cluster by name. Returns 0 on success. */
+static inline int32_t nr_reload_by_name(NrReloadManager* rm,
+                                         const char* name) {
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (strcmp(rm->clusters[i].name, name) == 0) {
+            return nr_reload(rm, i);
+        }
+    }
+    fprintf(stderr, "nr_reload: cluster '%s' not found\n", name);
+    return -1;
+}
+
+/* Reload all swappable clusters. Returns number of failures. */
+static inline int32_t nr_reload_all(NrReloadManager* rm) {
+    int32_t failures = 0;
+    for (int32_t i = 0; i < rm->count; i++) {
+        if (rm->clusters[i].reloadable) {
+            if (nr_reload_load(rm, i) != 0) {
+                failures++;
+            }
+        }
+    }
+    return failures;
+}
+
 /* ---- Binary I/O (NrWriter / NrReader) ---- */
 
 struct NrWriter {
