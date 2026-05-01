@@ -48,7 +48,44 @@ def _body_is_all_cold(stmts: list, cold_funcs: set) -> bool:
 # ---------------------------------------------------------------------------
 
 class CompileError(Exception):
-    pass
+    """Structured compile error with optional source location and hint.
+
+    Format mirrors rustc:
+        path:line:col: error[Cnnn]: message
+            help: hint
+    """
+    def __init__(self, message: str = "", *,
+                 file: str = None, lineno: int = None, col: int = None,
+                 hint: str = None, code: str = None):
+        self.message = message
+        self.file = file
+        self.lineno = lineno
+        self.col = col
+        self.hint = hint
+        self.code = code
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        # Header: "file:line:col: error[Cnnn]: message"
+        loc = ""
+        if self.file:
+            loc = self.file
+            if self.lineno:
+                loc += f":{self.lineno}"
+                if self.col is not None:
+                    loc += f":{self.col}"
+            loc += ": "
+        prefix = "error"
+        if self.code:
+            prefix += f"[{self.code}]"
+        out = f"{loc}{prefix}: {self.message}"
+        if self.hint:
+            # wrap hint on a new line, indented under the error
+            out += f"\n  help: {self.hint}"
+        return out
+
+    def __str__(self) -> str:
+        return self._format()
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +127,7 @@ class Compiler(StmtMixin, ExprMixin):
     _compile_time_funcs: set = field(default_factory=set)  # names of @compile_time functions
     _compile_time_arrays: set = field(default_factory=set) # names of @compile_time static arrays
     _cold_funcs: set = field(default_factory=set)          # names of @cold-decorated functions
+    _inline_funcs: set = field(default_factory=set)        # names of auto-inlined functions
     _all_func_defs: dict = field(default_factory=dict)     # fname → ast.FunctionDef for specialization
 
     thread_wrappers_emitted: set = field(default_factory=set)
@@ -148,6 +186,27 @@ class Compiler(StmtMixin, ExprMixin):
 
     def emit_header(self, line=""):
         self.header_lines.append(line)
+
+    # -------------------------------------------------------------------
+    # Error helpers
+    # -------------------------------------------------------------------
+
+    def error(self, msg: str, node=None, *,
+              hint: str = None, code: str = None) -> CompileError:
+        """Construct a structured CompileError with location from a node.
+
+        Returns the exception object; callers should `raise self.error(...)`.
+        """
+        lineno = getattr(node, 'lineno', None) if node is not None else None
+        col = getattr(node, 'col_offset', None) if node is not None else None
+        return CompileError(
+            msg,
+            file=getattr(self, '_current_file', None),
+            lineno=lineno or getattr(self, '_current_line', None) or None,
+            col=col,
+            hint=hint,
+            code=code,
+        )
 
     # -------------------------------------------------------------------
     # Decorator helpers
@@ -634,17 +693,20 @@ class Compiler(StmtMixin, ExprMixin):
         def check_use(vname: str, lineno: int) -> None:
             st = states.get(vname)
             if st == "moved":
-                print(
-                    f"{filepath}:{lineno}: error: use of moved value '{vname}'",
-                    file=sys.stderr,
+                raise CompileError(
+                    f"use of moved value '{vname}'",
+                    file=filepath, lineno=lineno, code="C010",
+                    hint=f"'{vname}' was moved by passing to an own[T] parameter "
+                         f"or being returned. Either avoid the move or rebind "
+                         f"'{vname}' before reuse.",
                 )
-                raise CompileError(f"use of moved value '{vname}'")
             if st == "freed":
-                print(
-                    f"{filepath}:{lineno}: error: use of freed value '{vname}'",
-                    file=sys.stderr,
+                raise CompileError(
+                    f"use of freed value '{vname}'",
+                    file=filepath, lineno=lineno, code="C011",
+                    hint=f"'{vname}' was freed earlier on this path. Reading or "
+                         f"writing through it is undefined behavior.",
                 )
-                raise CompileError(f"use of freed value '{vname}'")
 
         def walk_stmts(stmts: list) -> None:
             for stmt in stmts:
@@ -761,13 +823,13 @@ class Compiler(StmtMixin, ExprMixin):
             st = states[vname]
             if st == "alive":
                 lineno = func_node.end_lineno or func_node.lineno
-                print(
-                    f"{filepath}:{lineno}: error: owned value '{vname}' not "
-                    f"freed or transferred at end of function '{func_node.name}'",
-                    file=sys.stderr,
-                )
                 raise CompileError(
-                    f"owned value '{vname}' not freed or transferred"
+                    f"owned value '{vname}' not freed or transferred at end of "
+                    f"function '{func_node.name}'",
+                    file=filepath, lineno=lineno, code="C012",
+                    hint=f"add 'defer(free({vname}))' near the allocation, return "
+                         f"'{vname}' to transfer ownership, or pass it to a "
+                         f"function with own[T] parameter",
                 )
 
     # ── Weighted call graph for function layout ─────────────────────────
@@ -1182,6 +1244,126 @@ class Compiler(StmtMixin, ExprMixin):
             self._cold_funcs.add(fname)
 
     # -------------------------------------------------------------------
+    # Inline inference
+    # -------------------------------------------------------------------
+
+    def _infer_inline_from_body(self, tree) -> None:
+        """Auto-mark small leaf functions as `static inline`.
+
+        Only fires for the main translation unit (`__main__`). Library
+        modules emit prototypes in their .h file for cross-TU calls;
+        making those `static` would conflict with the non-static prototype.
+
+        Heuristics: not decorated noinline/extern/compile_time/trait/generic/
+        export/test/parallel/stream; not in _cold_funcs; body statement count
+        <= 3, total AST node count <= 30; no For/While/Try/nested FunctionDef;
+        not recursive; not address-taken; at least one caller in this module.
+        """
+        if self.current_module and self.current_module != "__main__":
+            return
+        skip_decs = frozenset({
+            "noinline", "extern", "compile_time", "trait", "generic",
+            "export", "test", "parallel", "stream",
+        })
+        BANNED_STMTS = (ast.For, ast.While, ast.Try, ast.FunctionDef,
+                         ast.AsyncFunctionDef)
+
+        # Collect candidate FunctionDef nodes (top-level + struct methods).
+        candidates: list = []   # [(qualified_name, node)]
+        for n in ast.iter_child_nodes(tree):
+            if isinstance(n, ast.FunctionDef):
+                candidates.append((n.name, n))
+            elif isinstance(n, ast.ClassDef):
+                for item in n.body:
+                    if isinstance(item, ast.FunctionDef):
+                        candidates.append((f"{n.name}_{item.name}", item))
+
+        # Build module-level call/reference info from all function bodies.
+        called_names: dict = {}       # name → count (as Call.func)
+        ref_names: set = set()        # name appears as bare Name in non-call
+
+        def _scan_refs(body):
+            for stmt in body:
+                for child in ast.walk(stmt):
+                    if (isinstance(child, ast.Call)
+                            and isinstance(child.func, ast.Name)):
+                        called_names[child.func.id] = called_names.get(
+                            child.func.id, 0) + 1
+                    elif isinstance(child, ast.Name):
+                        # Will be flagged as a ref unless covered by Call.func
+                        # below. We do a second pass that subtracts call-position
+                        # references.
+                        ref_names.add(child.id)
+
+        for _, node in candidates:
+            _scan_refs(node.body)
+
+        # Subtract call-position usages: a name that ONLY appears as Call.func
+        # is not address-taken. We approximate by checking if the name is also
+        # used outside Call.func position. To keep this simple, walk each body
+        # and collect (a) call-func names and (b) non-call Name references.
+        non_call_refs: set = set()
+        for _, node in candidates:
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                        # The Name child of a Call.func still gets walked by
+                        # ast.walk; we suppress it via parent tracking below.
+                        continue
+            # Walk explicitly with parent context.
+            for parent in ast.walk(node):
+                if isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name):
+                    callee_name_node = parent.func
+                else:
+                    callee_name_node = None
+                for ch in ast.iter_child_nodes(parent):
+                    if isinstance(ch, ast.Name) and ch is not callee_name_node:
+                        non_call_refs.add(ch.id)
+
+        for fname, node in candidates:
+            if any(d in self.get_decorators(node) for d in skip_decs):
+                continue
+            if "inline" in self.get_decorators(node):
+                continue  # already explicit
+            if fname in self._cold_funcs:
+                continue
+            # Recursion check: function calls itself
+            self_call = False
+            for child in ast.walk(node):
+                if (isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Name)
+                        and child.func.id == node.name):
+                    self_call = True
+                    break
+            if self_call:
+                continue
+            # Address-taken: the function's bare-name appears as a non-call
+            # reference (e.g. passed as a function pointer). Skip.
+            if node.name in non_call_refs:
+                continue
+            # Banned statement kinds
+            has_banned = False
+            for stmt in node.body:
+                for child in ast.walk(stmt):
+                    if isinstance(child, BANNED_STMTS) and child is not node:
+                        has_banned = True
+                        break
+                if has_banned:
+                    break
+            if has_banned:
+                continue
+            # Size cap: <=3 body statements, total node count <=30
+            if len(node.body) > 3:
+                continue
+            total_nodes = sum(1 for _ in ast.walk(node))
+            if total_nodes > 30:
+                continue
+            # Has at least one caller in this module
+            if called_names.get(node.name, 0) == 0:
+                continue
+            self._inline_funcs.add(fname)
+
+    # -------------------------------------------------------------------
     # Static leak detection
     # -------------------------------------------------------------------
 
@@ -1476,6 +1658,13 @@ class Compiler(StmtMixin, ExprMixin):
         if isinstance(node, ast.Attribute):
             obj_type = self.infer_type(node.value)
             base = obj_type.rstrip("*").strip()
+            # `.value` on a scalar pointer → pointee type
+            if (node.attr == "value"
+                    and obj_type.endswith("*")
+                    and base not in self.structs):
+                from compiler.codegen_exprs import _is_scalar_ptr_base
+                if _is_scalar_ptr_base(base):
+                    return base
             if base in self.structs:
                 for fname, ftype in self.structs[base]:
                     if fname == node.attr:
@@ -1520,6 +1709,142 @@ class Compiler(StmtMixin, ExprMixin):
             return "NrList*"
 
         return "int64_t"
+
+    def _try_infer_type(self, node):
+        """Strict variant of infer_type: returns None when type is not
+        confidently known (instead of falling back to int64_t).
+
+        Used by local-type inference for unannotated assignments —
+        we never want to silently widen an unknown type.
+        """
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool):
+                return "int"
+            if isinstance(node.value, int):
+                return "int64_t"
+            if isinstance(node.value, float):
+                return "double"
+            if isinstance(node.value, str):
+                return "NrStr*"
+            if node.value is None:
+                return None  # ambiguous — could be any pointer type
+            return None
+
+        if isinstance(node, ast.Name):
+            name = node.id
+            if name in ("True", "False"):
+                return "int"
+            if name in self.local_vars:
+                return self.local_vars[name]
+            if name in self.func_args:
+                return self.func_args[name]
+            if name in self.constants:
+                return self.constants[name]
+            if name in self.mutable_globals:
+                return self.mutable_globals[name]
+            return None
+
+        if isinstance(node, ast.BinOp):
+            lt = self._try_infer_type(node.left)
+            rt = self._try_infer_type(node.right)
+            if lt is None or rt is None:
+                return None
+            lb = lt.rstrip("*").strip()
+            if lb in self.structs:
+                _op_map = {
+                    ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__",
+                    ast.Div: "__truediv__", ast.Mod: "__mod__",
+                }
+                _op_name = _op_map.get(type(node.op))
+                if _op_name:
+                    _method = f"{lb}_{_op_name}"
+                    if _method in self.func_ret_types:
+                        return self.func_ret_types[_method]
+            if lt == "double" or rt == "double":
+                return "double"
+            if lt == "NrStr*" or rt == "NrStr*":
+                return "NrStr*"
+            return "int64_t"
+
+        if isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.Not):
+                return "int"
+            return self._try_infer_type(node.operand)
+
+        if isinstance(node, (ast.BoolOp, ast.Compare)):
+            return "int"
+
+        if isinstance(node, ast.JoinedStr):
+            return "NrStr*"
+
+        if isinstance(node, ast.IfExp):
+            tb = self._try_infer_type(node.body)
+            te = self._try_infer_type(node.orelse)
+            if tb is None or te is None:
+                return None
+            if tb == te:
+                return tb
+            if {tb, te} <= {"int64_t", "double"}:
+                return "double"
+            return None
+
+        if isinstance(node, ast.Attribute):
+            obj_type = self._try_infer_type(node.value)
+            if obj_type is None:
+                return None
+            base = obj_type.rstrip("*").strip()
+            # `.value` on a scalar pointer → pointee type
+            if (node.attr == "value"
+                    and obj_type.endswith("*")
+                    and base not in self.structs):
+                from compiler.codegen_exprs import _is_scalar_ptr_base
+                if _is_scalar_ptr_base(base):
+                    return base
+            if base in self.structs:
+                for fname, ftype in self.structs[base]:
+                    if fname == node.attr:
+                        if ftype == "__array__":
+                            et = self.struct_array_fields.get((base, node.attr))
+                            return et if et else None
+                        return ftype
+            return None
+
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Name):
+                vname = node.value.id
+                arr_info = self._array_vars.get(vname)
+                if arr_info:
+                    return arr_info[0]
+                et = self._list_vars.get(vname)
+                if et:
+                    return et
+            return None
+
+        if isinstance(node, ast.Call):
+            # Trust infer_call_type only when it produces a concrete answer.
+            # Heuristic: if the result is "int64_t" but the callee isn't a
+            # known int-returning function, it's likely a fallback — skip.
+            if isinstance(node.func, ast.Name):
+                fname = node.func.id
+                if fname in self.func_ret_types:
+                    return self.func_ret_types[fname]
+                if fname in self.structs:
+                    return fname
+                # Allow well-known builtins via infer_call_type
+                t = self.infer_call_type(node)
+                # Conservative: only accept if it isn't the "int64_t" fallback
+                # for an unknown function. Detect unknown by checking the call
+                # isn't in any known map.
+                _known_int = {
+                    "len", "list_len", "dict_len", "str_len", "str_find",
+                    "list_pop", "list_get", "dict_get",
+                }
+                if fname in _known_int or t != "int64_t":
+                    return t
+                return None
+            return None
+
+        return None
 
     def infer_call_type(self, node) -> str:
         if isinstance(node.func, ast.Name):
@@ -1724,7 +2049,8 @@ class Compiler(StmtMixin, ExprMixin):
             tree = ast.parse(source)
         except SyntaxError as e:
             raise CompileError(
-                f"{filepath}:{e.lineno}: syntax error: {e.msg}"
+                f"syntax error: {e.msg}",
+                file=filepath, lineno=e.lineno, col=e.offset, code="C000",
             ) from e
 
         # Strip "nathra" marker if present (first statement is a bare string "nathra")
@@ -2014,6 +2340,9 @@ class Compiler(StmtMixin, ExprMixin):
         self._infer_cold_from_body(tree)
         self._infer_cold_from_callsites(tree)
 
+        # @inline inference: small leaf functions get static inline
+        self._infer_inline_from_body(tree)
+
         # Static leak detection — warns to stderr, no effect on codegen
         self._check_leaks(tree, self._current_file or filepath)
 
@@ -2241,7 +2570,13 @@ class Compiler(StmtMixin, ExprMixin):
                     continue
                 proto = self._make_prototype(node, module_name)
                 if proto:
-                    self.emit(f"{proto};")
+                    # Match the qualifier used at definition time
+                    _qual = ""
+                    _decs = self.get_decorators(node)
+                    if "export" not in _decs:
+                        if "inline" in _decs or node.name in self._inline_funcs:
+                            _qual = "static inline "
+                    self.emit(f"{_qual}{proto};")
         self.emit("")
 
         # Emit struct-element typed list implementations (after structs are defined)

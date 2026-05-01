@@ -12,6 +12,7 @@ struct BuiltinEntry {
     char* value;
 };
 
+int64_t native_codegen_call__is_addressable_lvalue(CompilerState* restrict s, const AstNode* restrict node);
 char* native_codegen_call_lookup_builtin(const NrStr* name);
 NrStr* native_codegen_call_native_call_type_cast(CompilerState* restrict s, const NrStr* restrict fname, const AstCall* restrict node, const NrStr* restrict arg_str);
 NrStr* native_codegen_call_native_call_ptr_ops(CompilerState* restrict s, const NrStr* restrict fname, const AstCall* restrict node, const NrStr* restrict arg_str);

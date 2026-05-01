@@ -1,4 +1,4 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595281.407572 */
 #include "nathra_rt.h"
 #include "native_codegen_expr.h"
 
@@ -480,6 +480,13 @@ NrStr* native_codegen_expr_native_compile_expr(CompilerState* restrict s, const 
         NrStr* val2 = native_codegen_expr_native_compile_expr(s, p10->value);
         NrStr* obj_type = native_infer_native_infer_type(s, p10->value);
         if (native_infer__ends_with_star(obj_type)) {
+            NrStr* base_t = native_infer__strip_ptr(obj_type);
+            if ((nr_str_eq(attr_name, (&(NrStr){.data=(char*)"value",.len=5})) && native_infer__is_scalar_ptr_base(base_t) && (strmap_strmap_has((&s->structs), base_t) == 0))) {
+                if (((s->safe_mode != 0) && (p10->value != NULL) && (p10->value->tag == TAG_NAME))) {
+                    native_codegen_expr__emit(s, nr_str_format("nr_safe_null_check(%s, __FILE__, __LINE__);", val2->data));
+                }
+                return nr_str_format("(*(%s))", val2->data);
+            }
             if (((s->safe_mode != 0) && (p10->value != NULL) && (p10->value->tag == TAG_NAME))) {
                 native_codegen_expr__emit(s, nr_str_format("nr_safe_null_check(%s, __FILE__, __LINE__);", val2->data));
             }

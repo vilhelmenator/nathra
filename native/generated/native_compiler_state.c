@@ -1,8 +1,8 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595281.407572 */
 #include "nathra_rt.h"
 #include "native_compiler_state.h"
 
-static inline CompilerState _nr_make_CompilerState(NrWriter* lines, NrWriter* header, int32_t indent, StrMap local_vars, StrMap func_args, StrMap structs, StrMap constants, StrMap mutable_globals, StrMap enums, StrMap func_ret_types, StrMap func_param_types, StrMap func_param_order, StrMap typed_lists, StrMap array_vars, StrMap list_vars, StrMap funcptr_rettypes, StrMap struct_array_fields, StrMap struct_properties, StrMap result_types, StrSet cold_funcs, StrSet extern_funcs, StrSet serializable_structs, StrSet str_literal_vars, StrMap from_imports, StrMap modules, NrStr* current_module, NrStr* current_func_ret_type, int32_t safe_mode, int32_t reorder_funcs, StrSet* dce_roots, int32_t fstr_counter, int32_t lambda_counter, int32_t lc_counter, int32_t try_counter, int32_t thread_spawn_counter) {
+static inline CompilerState _nr_make_CompilerState(NrWriter* lines, NrWriter* header, int32_t indent, StrMap local_vars, StrMap func_args, StrMap structs, StrMap constants, StrMap mutable_globals, StrMap enums, StrMap func_ret_types, StrMap func_param_types, StrMap func_param_order, StrMap typed_lists, StrMap array_vars, StrMap list_vars, StrMap funcptr_rettypes, StrMap struct_array_fields, StrMap struct_properties, StrMap result_types, StrSet cold_funcs, StrSet inline_funcs, StrSet extern_funcs, StrSet serializable_structs, StrSet str_literal_vars, StrMap from_imports, StrMap modules, NrStr* current_module, NrStr* current_func_ret_type, int32_t safe_mode, int32_t reorder_funcs, StrSet* dce_roots, int32_t fstr_counter, int32_t lambda_counter, int32_t lc_counter, int32_t try_counter, int32_t thread_spawn_counter) {
     CompilerState _s = {0};
     _s.lines = lines;
     _s.header = header;
@@ -24,6 +24,7 @@ static inline CompilerState _nr_make_CompilerState(NrWriter* lines, NrWriter* he
     _s.struct_properties = struct_properties;
     _s.result_types = result_types;
     _s.cold_funcs = cold_funcs;
+    _s.inline_funcs = inline_funcs;
     _s.extern_funcs = extern_funcs;
     _s.serializable_structs = serializable_structs;
     _s.str_literal_vars = str_literal_vars;
@@ -84,14 +85,27 @@ static inline ParamNameList _nr_make_ParamNameList(NrStr** names, int32_t count)
     return _s;
 }
 
+ParamTypeList* native_compiler_state_param_type_list_new(int32_t count);
 CompilerState native_compiler_state_compiler_state_new(void);
 FieldList* native_compiler_state_field_list_new(int32_t count);
 NrStr* native_compiler_state_field_list_find(const FieldList* restrict fl, const NrStr* restrict name);
 
+ParamTypeList* native_compiler_state_param_type_list_new(int32_t count) {
+    "Allocate a ParamTypeList with `count` slots.";
+    ParamTypeList* p = malloc(16);
+    if ((count > 0)) {
+        p->types = malloc((((int64_t)(count)) * 8));
+    } else {
+        p->types = NULL;
+    }
+    p->count = count;
+    return p;
+}
+
 CompilerState native_compiler_state_compiler_state_new(void) {
     "Create a fresh compiler state with all maps initialized.";
     {
-        CompilerState s = (CompilerState){NULL, NULL, 0, strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(64), strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strmap_new(32), strmap_strmap_new(16), NULL, NULL, 0, 0, NULL, 0, 0, 0, 0, 0};
+        CompilerState s = (CompilerState){NULL, NULL, 0, strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(64), strmap_strmap_new(64), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(32), strmap_strmap_new(32), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strmap_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strset_new(16), strmap_strmap_new(32), strmap_strmap_new(16), NULL, NULL, 0, 0, NULL, 0, 0, 0, 0, 0};
         s.lines = nr_writer_new(4096);
         return s;
     }

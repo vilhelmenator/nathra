@@ -70,14 +70,61 @@ def process(arr: ptr[int], n: int) -> int:
 
 **Threshold:** up to 3 distinct constant combinations per callee are specialized freely (one copy each, negligible code size). Beyond 3 distinct combinations, specialization proceeds only for callees with ≤ 30 statements. Functions inside `@hot` or `@unroll` contexts are always eligible.
 
+### Inferred `@inline`
+
+Small leaf functions are automatically promoted to `static inline` — no annotation required. The compiler scans every function and inlines those that:
+
+- have ≤ 3 body statements and ≤ 30 total AST nodes
+- contain no `for` / `while` / nested function definitions
+- are not recursive (function does not call itself)
+- are not address-taken (the function name is never passed as a value, e.g. to `sort` or `thread_spawn`)
+- are not `@noinline`, `@cold`, `@extern`, `@export`, `@test`, `@parallel`, `@stream`, `@compile_time`, `@trait`, or `@generic`
+- have at least one caller in the same module
+
+Auto-inlining is disabled for non-`__main__` modules, since cross-translation-unit prototypes can't be `static`. The explicit `@inline` decorator remains supported and bypasses the heuristic.
+
+## Compiler errors
+
+Errors carry source location, an optional code, and a hint where one applies. Format mirrors `rustc`:
+
+```
+program.py:12: error[C001]: dereference of provably null pointer 'p'
+  help: check 'p is not None' before dereferencing, or assign a non-None
+        value before this point
+```
+
+Codes currently in use:
+
+| Code | Meaning |
+|---|---|
+| `C000` | Syntax error |
+| `C001` | Dereference of provably null pointer |
+| `C010` | Use of moved value (after transfer to `own[T]` parameter or return) |
+| `C011` | Use of freed value |
+| `C012` | Owned value not freed or transferred at end of function |
+
+Hints are append-only on a new line, so substring matchers in test fixtures keep working.
+
 ## Safety checks
 
-`--safe` enables runtime safety checks. All checks are gated behind `#ifdef NR_SAFE` so there is zero overhead when compiling without the flag.
+`--safe` enables runtime safety checks (division by zero, bounds, overflow, null pointer dereference under `--safe` for `unknown` cases). All checks are gated behind `#ifdef NR_SAFE` so there is zero overhead when the flag is off.
+
+The default depends on the build mode (`--mode`), which combines with `--safe` / `--no-safe` for explicit override:
+
+| Mode | Default `--safe` | Notes |
+|---|---|---|
+| `dev` (default) | on | Stricter compilation; the cost of catching bugs early outweighs the runtime cost. |
+| `service` | on | Long-running services under live reload. Same reasoning as `dev`. |
+| `release` | off | Ship configuration; production binaries skip the checks. |
 
 ```sh
-python3 cli/nathra.py program.py --safe          # compile with safety checks
-python3 cli/nathra.py program.py --safe --run     # compile and run
+python3 cli/nathra.py program.py                          # mode=dev → safe ON
+python3 cli/nathra.py program.py --mode=release           # safe OFF
+python3 cli/nathra.py program.py --mode=release --safe    # release with checks (override)
+python3 cli/nathra.py program.py --no-safe                # dev with checks off (override)
 ```
+
+Static null analysis is always on regardless of `--safe`. Provably-null dereferences are compile errors (`C001`); only the `unknown` cases require a runtime check.
 
 ### Division by zero
 

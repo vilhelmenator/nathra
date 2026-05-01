@@ -1,4 +1,4 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595589.979964 */
 #include "nathra_rt.h"
 #include "native_compile_file.h"
 
@@ -58,6 +58,13 @@ void native_compile_file__first_pass(CompilerState* s, AstNodeList body) {
             AstFunctionDef* fd = node->data;
             NrStr* ret_type = native_type_map_native_map_type(fd->returns);
             strmap_strmap_set((&s->func_ret_types), fd->name, ret_type);
+            AstArguments* args_node = fd->args->data;
+            ParamTypeList* ptl = native_compiler_state_param_type_list_new(args_node->args.count);
+            for (int64_t k = 0; k < args_node->args.count; k++) {
+                AstArg* arg = args_node->args.items[k]->data;
+                ptl->types[k] = native_type_map_native_map_type(arg->annotation);
+            }
+            strmap_strmap_set((&s->func_param_types), fd->name, ptl);
             continue;
         }
         if ((node->tag == TAG_CLASS_DEF)) {
@@ -594,7 +601,13 @@ void native_compile_file__emit_function_prototypes(CompilerState* s, AstNodeList
         if ((args_node->args.count == 0)) {
             arg_str = nr_str_new("void");
         }
-        native_compile_file__emit_raw(s, nr_str_format("%s %s(%s);", ret->data, fd->name->data, arg_str->data));
+        NrStr* proto_qual = nr_str_new("");
+        if ((native_compile_file__has_decorator(fd, nr_str_new("export")) == 0)) {
+            if (((native_compile_file__has_decorator(fd, nr_str_new("inline")) != 0) || (strmap_strset_has((&s->inline_funcs), fd->name) != 0))) {
+                proto_qual = nr_str_new("static inline ");
+            }
+        }
+        native_compile_file__emit_raw(s, nr_str_format("%s%s %s(%s);", proto_qual->data, ret->data, fd->name->data, arg_str->data));
     }
     native_compile_file__emit_raw(s, nr_str_new(""));
 }
@@ -668,10 +681,22 @@ void native_compile_file__compile_one_func(CompilerState* restrict s, AstFunctio
     if ((nr_str_len(prefix) > 0)) {
         fname = nr_str_concat(prefix, fd->name);
     }
+    NrStr* qual = nr_str_new("");
+    int64_t is_export = 0;
+    if (native_compile_file__has_decorator(fd, nr_str_new("export"))) {
+        is_export = 1;
+    }
+    int64_t has_inline_dec = 0;
+    if (native_compile_file__has_decorator(fd, nr_str_new("inline"))) {
+        has_inline_dec = 1;
+    }
+    if (((is_export == 0) && ((has_inline_dec != 0) || (strmap_strset_has((&s->inline_funcs), fname) != 0)))) {
+        qual = nr_str_new("static inline ");
+    }
     if (nr_str_eq(fname, (&(NrStr){.data=(char*)"main",.len=4}))) {
         native_compile_file__emit_raw(s, nr_str_new("int main(void) {"));
     } else {
-        native_compile_file__emit_raw(s, nr_str_format("%s %s(%s) {", ret->data, fname->data, arg_str->data));
+        native_compile_file__emit_raw(s, nr_str_format("%s%s %s(%s) {", qual->data, ret->data, fname->data, arg_str->data));
     }
     s->indent = (int32_t)(1);
     for (int64_t j = 0; j < fd->body.count; j++) {
@@ -1149,6 +1174,7 @@ int32_t native_compile_file_native_compile(const uint8_t* restrict ast_buf, int6
     native_compile_file__first_pass((&s), mod->body);
     native_compile_file__scan_typed_lists((&s), mod->body);
     native_analysis_native_infer_cold_from_body((&s), mod->body);
+    native_analysis_native_infer_inline_from_body((&s), mod->body);
     native_analysis_native_build_alloc_tags((&s), mod->body);
     native_compile_file__emit_includes((&s), mod->body);
     native_compile_file__emit_typed_lists((&s));
@@ -1266,6 +1292,7 @@ int32_t native_compile_file_native_compile_main(CompilerState* restrict state, c
     native_compile_file__first_pass(state, mod->body);
     native_compile_file__scan_typed_lists(state, mod->body);
     native_analysis_native_infer_cold_from_body(state, mod->body);
+    native_analysis_native_infer_inline_from_body(state, mod->body);
     native_analysis_native_build_alloc_tags(state, mod->body);
     state->lines = nr_writer_new(4096);
     native_compile_file__emit_includes(state, mod->body);

@@ -43,6 +43,7 @@ class CompilerState:
 
     # Sets
     cold_funcs: StrSet
+    inline_funcs: StrSet
     extern_funcs: StrSet
     serializable_structs: StrSet
     str_literal_vars: StrSet
@@ -87,6 +88,16 @@ class ParamTypeList:
     types: ptr[str]
     count: i32
 
+def param_type_list_new(count: i32) -> ptr[ParamTypeList]:
+    """Allocate a ParamTypeList with `count` slots."""
+    p: ptr[ParamTypeList] = alloc(16)
+    if count > 0:
+        p.types = alloc(cast_int(count) * 8)
+    else:
+        p.types = None
+    p.count = count
+    return p
+
 class ParamNameList:
     names: ptr[str]
     count: i32
@@ -102,7 +113,7 @@ def compiler_state_new() -> CompilerState:
         strmap_new(64), strmap_new(64), strmap_new(32),
         strmap_new(16), strmap_new(32), strmap_new(32), strmap_new(16),
         strmap_new(16), strmap_new(16), strmap_new(16),
-        strset_new(16), strset_new(16), strset_new(16), strset_new(16),
+        strset_new(16), strset_new(16), strset_new(16), strset_new(16), strset_new(16),
         strmap_new(32), strmap_new(16),
         None, None,
         0, 0, None,

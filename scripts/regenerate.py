@@ -71,6 +71,22 @@ MODULES = [
 ]
 
 
+def _clean_intermediate(directory: str) -> int:
+    """Remove .c and .h files in `directory` (the .py sources are kept).
+
+    The Python compiler writes intermediate .c/.h files next to .py sources
+    when `compile_dependency` resolves imports. These are not used by the
+    build (the build reads from native/generated/) — clean them up so
+    native/src/ stays a pure source directory.
+    """
+    removed = 0
+    for f in os.listdir(directory):
+        if f.endswith(".c") or f.endswith(".h"):
+            os.remove(os.path.join(directory, f))
+            removed += 1
+    return removed
+
+
 def main():
     os.makedirs(GEN_DIR, exist_ok=True)
 
@@ -99,6 +115,12 @@ def main():
     with open(rt_path, "w") as f:
         f.write(RT_IMPL)
     print(f"  rt_impl.c")
+
+    # Clean up intermediate .c/.h that the compiler wrote next to the .py
+    # sources during dependency resolution. These belong only in GEN_DIR.
+    n_cleaned = _clean_intermediate(SRC_DIR)
+    if n_cleaned:
+        print(f"  Cleaned {n_cleaned} intermediate .c/.h from {SRC_DIR}")
 
     print(f"\nRegenerated {len(MODULES)} modules into {GEN_DIR}")
 

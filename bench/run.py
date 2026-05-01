@@ -16,7 +16,8 @@ def run(cmd, env=None):
     return result.stdout.strip()
 
 print("Building nathra binary...")
-run([sys.executable, os.path.join(ROOT, "mpy.py"), BENCH, "--flags=-O2"],
+run([sys.executable, os.path.join(ROOT, "mpy.py"), BENCH,
+     "--mode=release", "--flags=-O2"],
     env={**os.environ, "PYTHONPATH": ROOT})
 
 print()

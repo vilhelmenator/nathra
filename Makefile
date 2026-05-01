@@ -72,3 +72,15 @@ bootstrap: $(DYLIB)
 
 clean:
 	rm -rf $(BUILD)
+	# Intermediate .c/.h next to .py sources (only where a matching .py exists,
+	# so handwritten C reference files like bench/bench_opts_naive.c are kept).
+	@for d in native/src tests bench examples/spinning_cube examples/sierra_chart; do \
+	  if [ -d "$$d" ]; then \
+	    for py in $$d/*.py; do \
+	      [ -f "$$py" ] || continue; \
+	      base=$${py%.py}; \
+	      rm -f "$$base.c" "$$base.h"; \
+	    done; \
+	  fi; \
+	done
+	@find . -name __pycache__ -type d -prune -exec rm -rf {} +

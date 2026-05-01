@@ -1,4 +1,4 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595281.407572 */
 #include "nathra_rt.h"
 #include "native_codegen_stmt.h"
 
@@ -26,100 +26,6 @@ void native_codegen_stmt__emit(CompilerState* restrict s, const NrStr* restrict 
     }
     nr_write_text(s->lines, line);
     nr_write_text(s->lines, nr_str_new("\n"));
-}
-
-NrStr* native_codegen_stmt__infer_cleanup(const NrStr* open_func) {
-    "Infer cleanup function from open/create function name.\n    Matches Python compiler's _infer_cleanup (codegen_stmts.py:1660).";
-    if ((nr_str_eq(open_func, (&(NrStr){.data=(char*)"open",.len=4})) || nr_str_eq(open_func, (&(NrStr){.data=(char*)"file_open",.len=9})))) {
-        return nr_str_new("nr_file_close");
-    }
-    if (nr_str_ends_with(open_func, nr_str_new("_open"))) {
-        NrStr* base = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 5));
-        return nr_str_concat(base, (&(NrStr){.data=(char*)"_close",.len=6}));
-    }
-    if (nr_str_ends_with(open_func, nr_str_new("_new"))) {
-        NrStr* base2 = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 4));
-        return nr_str_concat(base2, (&(NrStr){.data=(char*)"_free",.len=5}));
-    }
-    if (nr_str_ends_with(open_func, nr_str_new("_create"))) {
-        NrStr* base3 = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 7));
-        return nr_str_concat(base3, (&(NrStr){.data=(char*)"_destroy",.len=8}));
-    }
-    return NULL;
-}
-
-void native_codegen_stmt_native_compile_with(CompilerState* restrict s, const AstNode* restrict node) {
-    AstWith* p = node->data;
-    if ((p->items.count == 1)) {
-        AstWithItem* item0 = p->items.items[0]->data;
-        AstNode* ctx0 = item0->context_expr;
-        if (((ctx0 != NULL) && (ctx0->tag == TAG_CALL))) {
-            AstCall* sc = ctx0->data;
-            if (((sc->func != NULL) && (sc->func->tag == TAG_NAME))) {
-                AstName* scn = sc->func->data;
-                if ((nr_str_eq(scn->id, (&(NrStr){.data=(char*)"scope",.len=5})) && (sc->args.count >= 2))) {
-                    AstNode* arena_arg = sc->args.items[0];
-                    if ((arena_arg->tag == TAG_NAME)) {
-                        AstName* arena_n = arena_arg->data;
-                        NrStr* size_expr = native_codegen_expr_native_compile_expr(s, sc->args.items[1]);
-                        native_codegen_stmt__emit(s, nr_str_new("{"));
-                        s->indent = (int32_t)((s->indent + 1));
-                        native_codegen_stmt__emit(s, nr_str_format("NrArena* %s = nr_arena_new(%s);", arena_n->id->data, size_expr->data));
-                        strmap_strmap_set((&s->local_vars), arena_n->id, nr_str_new("NrArena*"));
-                        for (int64_t si = 0; si < p->body.count; si++) {
-                            native_codegen_stmt_native_compile_stmt(s, p->body.items[si]);
-                        }
-                        native_codegen_stmt__emit(s, nr_str_format("nr_arena_free(%s);", arena_n->id->data));
-                        s->indent = (int32_t)((s->indent - 1));
-                        native_codegen_stmt__emit(s, nr_str_new("}"));
-                        return;
-                    }
-                }
-            }
-        }
-    }
-    NrStr** cleanup_fns = malloc((16 * 8));
-    NrStr** var_names = malloc((16 * 8));
-    int32_t item_count = p->items.count;
-    for (int64_t i = 0; i < item_count; i++) {
-        NR_PREFETCH(&cleanup_fns[i + 8], 0, 1);
-        NR_PREFETCH(&var_names[i + 8], 0, 1);
-        AstWithItem* item = p->items.items[i]->data;
-        NrStr* enter_expr = native_codegen_expr_native_compile_expr(s, item->context_expr);
-        cleanup_fns[i] = NULL;
-        var_names[i] = NULL;
-        AstNode* ctx = item->context_expr;
-        if (((ctx != NULL) && (ctx->tag == TAG_CALL))) {
-            AstCall* cc = ctx->data;
-            AstNode* cf = cc->func;
-            if (((cf != NULL) && (cf->tag == TAG_NAME))) {
-                AstName* cfn = cf->data;
-                cleanup_fns[i] = native_codegen_stmt__infer_cleanup(cfn->id);
-            }
-        }
-        native_codegen_stmt__emit(s, nr_str_new("{"));
-        s->indent = (int32_t)((s->indent + 1));
-        if (((item->optional_vars != NULL) && (item->optional_vars->tag == TAG_NAME))) {
-            AstName* vn = item->optional_vars->data;
-            var_names[i] = vn->id;
-            native_codegen_stmt__emit(s, nr_str_format("__auto_type %s = %s;", vn->id->data, enter_expr->data));
-        } else {
-            native_codegen_stmt__emit(s, nr_str_format("%s;", enter_expr->data));
-        }
-    }
-    for (int64_t i = 0; i < p->body.count; i++) {
-        native_codegen_stmt_native_compile_stmt(s, p->body.items[i]);
-    }
-    for (int64_t i = 0; i < item_count; i++) {
-        int32_t idx = (int32_t)(((item_count - 1) - i));
-        if (((cleanup_fns[idx] != NULL) && (var_names[idx] != NULL))) {
-            native_codegen_stmt__emit(s, nr_str_format("%s(%s);", cleanup_fns[idx]->data, var_names[idx]->data));
-        }
-        s->indent = (int32_t)((s->indent - 1));
-        native_codegen_stmt__emit(s, nr_str_new("}"));
-    }
-    free(cleanup_fns);
-    free(var_names);
 }
 
 void native_codegen_stmt_native_compile_ann_assign(CompilerState* restrict s, const AstNode* restrict node) {
@@ -281,196 +187,16 @@ void native_codegen_stmt_native_compile_ann_assign(CompilerState* restrict s, co
     strmap_strmap_set((&s->local_vars), vn->id, ctype);
 }
 
-void native_codegen_stmt_native_compile_assign(CompilerState* restrict s, const AstNode* restrict node) {
-    AstAssign* p = node->data;
-    NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
-    for (int64_t i = 0; i < p->targets.count; i++) {
-        AstNode* tgt_node = p->targets.items[i];
-        if ((tgt_node->tag == TAG_SUBSCRIPT)) {
-            AstSubscript* ts = tgt_node->data;
-            if (((ts->value != NULL) && (ts->value->tag == TAG_NAME))) {
-                AstName* tn = ts->value->data;
-                NrStr* tl_et = strmap_strmap_get((&s->list_vars), tn->id);
-                if ((tl_et != NULL)) {
-                    NrStr* tl_ln = strmap_strmap_get((&s->typed_lists), tl_et);
-                    if ((tl_ln != NULL)) {
-                        NrStr* obj_e = native_codegen_expr_native_compile_expr(s, ts->value);
-                        NrStr* idx_e = native_codegen_expr_native_compile_expr(s, ts->slice);
-                        native_codegen_stmt__emit(s, nr_str_format("%s_set(%s, %s, %s);", tl_ln->data, obj_e->data, idx_e->data, val->data));
-                        continue;
-                    }
-                }
-                NrStr* d_vt = strmap_strmap_get((&s->local_vars), nr_str_concat((&(NrStr){.data=(char*)"__dict_V_",.len=9}), tn->id));
-                if ((d_vt != NULL)) {
-                    NrStr* d_obj = native_codegen_expr_native_compile_expr(s, ts->value);
-                    NrStr* d_key = native_codegen_expr_native_compile_expr(s, ts->slice);
-                    NrStr* boxed_v = nr_str_format("nr_val_int((int64_t)(%s))", val->data);
-                    if (nr_str_eq(d_vt, (&(NrStr){.data=(char*)"double",.len=6}))) {
-                        boxed_v = nr_str_format("nr_val_float(%s)", val->data);
-                    }
-                    native_codegen_stmt__emit(s, nr_str_format("nr_dict_set(%s, %s, %s);", d_obj->data, d_key->data, boxed_v->data));
-                    continue;
-                }
-            }
-        }
-        NrStr* tgt = native_codegen_expr_native_compile_expr(s, tgt_node);
-        native_codegen_stmt__emit(s, nr_str_format("%s = %s;", tgt->data, val->data));
-    }
-}
-
-NrStr* native_codegen_stmt__aug_op_method(uint8_t op) {
-    if ((op == OP_ADD)) {
-        return nr_str_new("__add__");
-    }
-    if ((op == OP_SUB)) {
-        return nr_str_new("__sub__");
-    }
-    if ((op == OP_MULT)) {
-        return nr_str_new("__mul__");
-    }
-    if ((op == OP_DIV)) {
-        return nr_str_new("__truediv__");
-    }
-    if ((op == OP_MOD)) {
-        return nr_str_new("__mod__");
-    }
-    return NULL;
-}
-
-void native_codegen_stmt_native_compile_aug_assign(CompilerState* restrict s, const AstNode* restrict node) {
-    AstAugAssign* p = node->data;
-    NrStr* tgt_type = native_infer_native_infer_type(s, p->target);
-    NrStr* tgt_base = native_infer__strip_ptr(tgt_type);
-    if (strmap_strmap_has((&s->structs), tgt_base)) {
-        NrStr* method = native_codegen_stmt__aug_op_method(p->op);
-        if ((method != NULL)) {
-            NrStr* mname = nr_str_concat(nr_str_concat(tgt_base, (&(NrStr){.data=(char*)"_",.len=1})), method);
-            if (strmap_strmap_has((&s->func_ret_types), mname)) {
-                NrStr* tgt = native_codegen_expr_native_compile_expr(s, p->target);
-                NrStr* rhs = native_codegen_expr_native_compile_expr(s, p->value);
-                NrStr* self_arg = tgt;
-                if ((native_infer__ends_with_star(tgt_type) == 0)) {
-                    self_arg = nr_str_format("&(%s)", tgt->data);
-                }
-                native_codegen_stmt__emit(s, nr_str_format("%s = %s(%s, %s);", tgt->data, mname->data, self_arg->data, rhs->data));
-                return;
-            }
-        }
-    }
-    NrStr* tgt2 = native_codegen_expr_native_compile_expr(s, p->target);
-    NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
-    if ((s->safe_mode != 0)) {
-        if ((nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int64_t",.len=7})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int",.len=3})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int32_t",.len=7})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"uint8_t",.len=7})))) {
-            if ((p->op == OP_DIV)) {
-                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_div_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
-                return;
-            }
-            if ((p->op == OP_MOD)) {
-                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_mod_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
-                return;
-            }
-            if ((p->op == OP_ADD)) {
-                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_add_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
-                return;
-            }
-            if ((p->op == OP_SUB)) {
-                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_sub_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
-                return;
-            }
-            if ((p->op == OP_MULT)) {
-                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_mul_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
-                return;
-            }
-        }
-    }
-    NrStr* op = native_codegen_expr_native_compile_op(p->op);
-    native_codegen_stmt__emit(s, nr_str_format("%s %s= %s;", tgt2->data, op->data, val->data));
-}
-
-void native_codegen_stmt_native_compile_return(CompilerState* restrict s, const AstNode* restrict node) {
-    AstReturn* p = node->data;
-    if ((p->value != NULL)) {
-        NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
-        native_codegen_stmt__emit(s, nr_str_format("return %s;", val->data));
-    } else {
-        native_codegen_stmt__emit(s, nr_str_new("return;"));
-    }
-}
-
-void native_codegen_stmt_native_compile_if(CompilerState* restrict s, const AstNode* restrict node) {
-    AstIf* p = node->data;
+void native_codegen_stmt_native_compile_while(CompilerState* restrict s, const AstNode* restrict node) {
+    AstWhile* p = node->data;
     NrStr* cond = native_codegen_expr_native_compile_expr(s, p->test);
-    NrStr* test_type = native_infer_native_infer_type(s, p->test);
-    NrStr* test_base = native_infer__strip_ptr(test_type);
-    NrStr* bool_method = nr_str_concat(test_base, (&(NrStr){.data=(char*)"___bool__",.len=9}));
-    if ((strmap_strmap_has((&s->structs), test_base) && strmap_strmap_has((&s->func_ret_types), bool_method))) {
-        NrStr* obj = native_codegen_expr_native_compile_expr(s, p->test);
-        if (native_infer__ends_with_star(test_type)) {
-            cond = nr_str_format("%s(%s)", bool_method->data, obj->data);
-        } else {
-            cond = nr_str_format("%s(&(%s))", bool_method->data, obj->data);
-        }
-    }
-    int64_t is_guard = 0;
-    if (((p->orelse.count == 0) && (p->body.count == 1))) {
-        AstNode* guard_node = p->body.items[0];
-        if ((guard_node->tag == TAG_RAISE)) {
-            is_guard = 1;
-        }
-    }
-    if (is_guard) {
-        native_codegen_stmt__emit(s, nr_str_format("if (NR_UNLIKELY(%s)) {", cond->data));
-    } else {
-        native_codegen_stmt__emit(s, nr_str_format("if (%s) {", cond->data));
-    }
+    native_codegen_stmt__emit(s, nr_str_format("while (%s) {", cond->data));
     s->indent = (int32_t)((s->indent + 1));
     for (int64_t i = 0; i < p->body.count; i++) {
         native_codegen_stmt_native_compile_stmt(s, p->body.items[i]);
     }
     s->indent = (int32_t)((s->indent - 1));
-    if ((p->orelse.count > 0)) {
-        if ((p->orelse.count == 1)) {
-            AstNode* elif_node = p->orelse.items[0];
-            if ((elif_node->tag == TAG_IF)) {
-                native_codegen_stmt__emit(s, nr_str_new("} else "));
-                native_codegen_stmt_native_compile_if(s, elif_node);
-                return;
-            }
-        }
-        native_codegen_stmt__emit(s, nr_str_new("} else {"));
-        s->indent = (int32_t)((s->indent + 1));
-        for (int64_t i = 0; i < p->orelse.count; i++) {
-            native_codegen_stmt_native_compile_stmt(s, p->orelse.items[i]);
-        }
-        s->indent = (int32_t)((s->indent - 1));
-    }
     native_codegen_stmt__emit(s, nr_str_new("}"));
-}
-
-void native_codegen_stmt_native_compile_raise(CompilerState* restrict s, const AstNode* restrict node) {
-    AstRaise* p = node->data;
-    if ((p->exc != NULL)) {
-        NrStr* msg = native_codegen_expr_native_compile_expr(s, p->exc);
-        NrStr* ret = s->current_func_ret_type;
-        if (((ret != NULL) && nr_str_starts_with(ret, nr_str_new("Result_")))) {
-            native_codegen_stmt__emit(s, nr_str_format("return %s_err(%s);", ret->data, msg->data));
-        } else {
-            native_codegen_stmt__emit(s, nr_str_format("fprintf(stderr, \"Error: %%s\\n\", %s); abort();", msg->data));
-        }
-    } else {
-        native_codegen_stmt__emit(s, nr_str_new("fprintf(stderr, \"raise with no argument\\n\"); abort();"));
-    }
-}
-
-void native_codegen_stmt_native_compile_assert(CompilerState* restrict s, const AstNode* restrict node) {
-    AstAssert* p = node->data;
-    NrStr* cond = native_codegen_expr_native_compile_expr(s, p->test);
-    if ((p->msg != NULL)) {
-        NrStr* msg = native_codegen_expr_native_compile_expr(s, p->msg);
-        native_codegen_stmt__emit(s, nr_str_format("if (!(%s)) { fprintf(stderr, \"AssertionError: %%s\\n\", %s); abort(); }", cond->data, msg->data));
-    } else {
-        native_codegen_stmt__emit(s, nr_str_format("if (!(%s)) { fprintf(stderr, \"AssertionError\\n\"); abort(); }", cond->data));
-    }
 }
 
 void native_codegen_stmt_native_compile_for(CompilerState* restrict s, const AstNode* restrict node) {
@@ -829,16 +555,332 @@ void native_codegen_stmt_native_compile_match(CompilerState* restrict s, const A
     }
 }
 
-void native_codegen_stmt_native_compile_while(CompilerState* restrict s, const AstNode* restrict node) {
-    AstWhile* p = node->data;
+void native_codegen_stmt_native_compile_assign(CompilerState* restrict s, const AstNode* restrict node) {
+    AstAssign* p = node->data;
+    NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
+    for (int64_t i = 0; i < p->targets.count; i++) {
+        AstNode* tgt_node = p->targets.items[i];
+        if ((tgt_node->tag == TAG_SUBSCRIPT)) {
+            AstSubscript* ts = tgt_node->data;
+            if (((ts->value != NULL) && (ts->value->tag == TAG_NAME))) {
+                AstName* tn = ts->value->data;
+                NrStr* tl_et = strmap_strmap_get((&s->list_vars), tn->id);
+                if ((tl_et != NULL)) {
+                    NrStr* tl_ln = strmap_strmap_get((&s->typed_lists), tl_et);
+                    if ((tl_ln != NULL)) {
+                        NrStr* obj_e = native_codegen_expr_native_compile_expr(s, ts->value);
+                        NrStr* idx_e = native_codegen_expr_native_compile_expr(s, ts->slice);
+                        native_codegen_stmt__emit(s, nr_str_format("%s_set(%s, %s, %s);", tl_ln->data, obj_e->data, idx_e->data, val->data));
+                        continue;
+                    }
+                }
+                NrStr* d_vt = strmap_strmap_get((&s->local_vars), nr_str_concat((&(NrStr){.data=(char*)"__dict_V_",.len=9}), tn->id));
+                if ((d_vt != NULL)) {
+                    NrStr* d_obj = native_codegen_expr_native_compile_expr(s, ts->value);
+                    NrStr* d_key = native_codegen_expr_native_compile_expr(s, ts->slice);
+                    NrStr* boxed_v = nr_str_format("nr_val_int((int64_t)(%s))", val->data);
+                    if (nr_str_eq(d_vt, (&(NrStr){.data=(char*)"double",.len=6}))) {
+                        boxed_v = nr_str_format("nr_val_float(%s)", val->data);
+                    }
+                    native_codegen_stmt__emit(s, nr_str_format("nr_dict_set(%s, %s, %s);", d_obj->data, d_key->data, boxed_v->data));
+                    continue;
+                }
+            }
+        }
+        if ((tgt_node->tag == TAG_ATTRIBUTE)) {
+            AstAttribute* ta = tgt_node->data;
+            if (nr_str_eq(ta->attr, (&(NrStr){.data=(char*)"value",.len=5}))) {
+                NrStr* ot = native_infer_native_infer_type(s, ta->value);
+                NrStr* ob = native_infer__strip_ptr(ot);
+                if (((native_infer__ends_with_star(ot) != 0) && (native_infer__is_scalar_ptr_base(ob) != 0) && (strmap_strmap_has((&s->structs), ob) == 0))) {
+                    NrStr* pe = native_codegen_expr_native_compile_expr(s, ta->value);
+                    native_codegen_stmt__emit(s, nr_str_format("*(%s) = %s;", pe->data, val->data));
+                    continue;
+                }
+            }
+        }
+        if ((tgt_node->tag == TAG_NAME)) {
+            AstName* tn2 = tgt_node->data;
+            int64_t already = 0;
+            if (strmap_strmap_has((&s->local_vars), tn2->id)) {
+                already = 1;
+            }
+            if (((already == 0) && strmap_strmap_has((&s->func_args), tn2->id))) {
+                already = 1;
+            }
+            if (((already == 0) && strmap_strmap_has((&s->constants), tn2->id))) {
+                already = 1;
+            }
+            if (((already == 0) && strmap_strmap_has((&s->mutable_globals), tn2->id))) {
+                already = 1;
+            }
+            if (((already == 0) && strmap_strmap_has((&s->array_vars), tn2->id))) {
+                already = 1;
+            }
+            if (((already == 0) && strmap_strmap_has((&s->list_vars), tn2->id))) {
+                already = 1;
+            }
+            if ((already == 0)) {
+                NrStr* inferred = native_infer_native_try_infer_type(s, p->value);
+                if ((inferred != NULL)) {
+                    strmap_strmap_set((&s->local_vars), tn2->id, inferred);
+                    native_codegen_stmt__emit(s, nr_str_format("%s %s = %s;", inferred->data, tn2->id->data, val->data));
+                    continue;
+                }
+            }
+        }
+        NrStr* tgt = native_codegen_expr_native_compile_expr(s, tgt_node);
+        native_codegen_stmt__emit(s, nr_str_format("%s = %s;", tgt->data, val->data));
+    }
+}
+
+void native_codegen_stmt_native_compile_return(CompilerState* restrict s, const AstNode* restrict node) {
+    AstReturn* p = node->data;
+    if ((p->value != NULL)) {
+        NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
+        native_codegen_stmt__emit(s, nr_str_format("return %s;", val->data));
+    } else {
+        native_codegen_stmt__emit(s, nr_str_new("return;"));
+    }
+}
+
+void native_codegen_stmt_native_compile_assert(CompilerState* restrict s, const AstNode* restrict node) {
+    AstAssert* p = node->data;
     NrStr* cond = native_codegen_expr_native_compile_expr(s, p->test);
-    native_codegen_stmt__emit(s, nr_str_format("while (%s) {", cond->data));
+    if ((p->msg != NULL)) {
+        NrStr* msg = native_codegen_expr_native_compile_expr(s, p->msg);
+        native_codegen_stmt__emit(s, nr_str_format("if (!(%s)) { fprintf(stderr, \"AssertionError: %%s\\n\", %s); abort(); }", cond->data, msg->data));
+    } else {
+        native_codegen_stmt__emit(s, nr_str_format("if (!(%s)) { fprintf(stderr, \"AssertionError\\n\"); abort(); }", cond->data));
+    }
+}
+
+void native_codegen_stmt_native_compile_if(CompilerState* restrict s, const AstNode* restrict node) {
+    AstIf* p = node->data;
+    NrStr* cond = native_codegen_expr_native_compile_expr(s, p->test);
+    NrStr* test_type = native_infer_native_infer_type(s, p->test);
+    NrStr* test_base = native_infer__strip_ptr(test_type);
+    NrStr* bool_method = nr_str_concat(test_base, (&(NrStr){.data=(char*)"___bool__",.len=9}));
+    if ((strmap_strmap_has((&s->structs), test_base) && strmap_strmap_has((&s->func_ret_types), bool_method))) {
+        NrStr* obj = native_codegen_expr_native_compile_expr(s, p->test);
+        if (native_infer__ends_with_star(test_type)) {
+            cond = nr_str_format("%s(%s)", bool_method->data, obj->data);
+        } else {
+            cond = nr_str_format("%s(&(%s))", bool_method->data, obj->data);
+        }
+    }
+    int64_t is_guard = 0;
+    if (((p->orelse.count == 0) && (p->body.count == 1))) {
+        AstNode* guard_node = p->body.items[0];
+        if ((guard_node->tag == TAG_RAISE)) {
+            is_guard = 1;
+        }
+    }
+    if (is_guard) {
+        native_codegen_stmt__emit(s, nr_str_format("if (NR_UNLIKELY(%s)) {", cond->data));
+    } else {
+        native_codegen_stmt__emit(s, nr_str_format("if (%s) {", cond->data));
+    }
     s->indent = (int32_t)((s->indent + 1));
     for (int64_t i = 0; i < p->body.count; i++) {
         native_codegen_stmt_native_compile_stmt(s, p->body.items[i]);
     }
     s->indent = (int32_t)((s->indent - 1));
+    if ((p->orelse.count > 0)) {
+        if ((p->orelse.count == 1)) {
+            AstNode* elif_node = p->orelse.items[0];
+            if ((elif_node->tag == TAG_IF)) {
+                native_codegen_stmt__emit(s, nr_str_new("} else "));
+                native_codegen_stmt_native_compile_if(s, elif_node);
+                return;
+            }
+        }
+        native_codegen_stmt__emit(s, nr_str_new("} else {"));
+        s->indent = (int32_t)((s->indent + 1));
+        for (int64_t i = 0; i < p->orelse.count; i++) {
+            native_codegen_stmt_native_compile_stmt(s, p->orelse.items[i]);
+        }
+        s->indent = (int32_t)((s->indent - 1));
+    }
     native_codegen_stmt__emit(s, nr_str_new("}"));
+}
+
+NrStr* native_codegen_stmt__infer_cleanup(const NrStr* open_func) {
+    "Infer cleanup function from open/create function name.\n    Matches Python compiler's _infer_cleanup (codegen_stmts.py:1660).";
+    if ((nr_str_eq(open_func, (&(NrStr){.data=(char*)"open",.len=4})) || nr_str_eq(open_func, (&(NrStr){.data=(char*)"file_open",.len=9})))) {
+        return nr_str_new("nr_file_close");
+    }
+    if (nr_str_ends_with(open_func, nr_str_new("_open"))) {
+        NrStr* base = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 5));
+        return nr_str_concat(base, (&(NrStr){.data=(char*)"_close",.len=6}));
+    }
+    if (nr_str_ends_with(open_func, nr_str_new("_new"))) {
+        NrStr* base2 = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 4));
+        return nr_str_concat(base2, (&(NrStr){.data=(char*)"_free",.len=5}));
+    }
+    if (nr_str_ends_with(open_func, nr_str_new("_create"))) {
+        NrStr* base3 = nr_str_slice(open_func, 0, (nr_str_len(open_func) - 7));
+        return nr_str_concat(base3, (&(NrStr){.data=(char*)"_destroy",.len=8}));
+    }
+    return NULL;
+}
+
+void native_codegen_stmt_native_compile_with(CompilerState* restrict s, const AstNode* restrict node) {
+    AstWith* p = node->data;
+    if ((p->items.count == 1)) {
+        AstWithItem* item0 = p->items.items[0]->data;
+        AstNode* ctx0 = item0->context_expr;
+        if (((ctx0 != NULL) && (ctx0->tag == TAG_CALL))) {
+            AstCall* sc = ctx0->data;
+            if (((sc->func != NULL) && (sc->func->tag == TAG_NAME))) {
+                AstName* scn = sc->func->data;
+                if ((nr_str_eq(scn->id, (&(NrStr){.data=(char*)"scope",.len=5})) && (sc->args.count >= 2))) {
+                    AstNode* arena_arg = sc->args.items[0];
+                    if ((arena_arg->tag == TAG_NAME)) {
+                        AstName* arena_n = arena_arg->data;
+                        NrStr* size_expr = native_codegen_expr_native_compile_expr(s, sc->args.items[1]);
+                        native_codegen_stmt__emit(s, nr_str_new("{"));
+                        s->indent = (int32_t)((s->indent + 1));
+                        native_codegen_stmt__emit(s, nr_str_format("NrArena* %s = nr_arena_new(%s);", arena_n->id->data, size_expr->data));
+                        strmap_strmap_set((&s->local_vars), arena_n->id, nr_str_new("NrArena*"));
+                        for (int64_t si = 0; si < p->body.count; si++) {
+                            native_codegen_stmt_native_compile_stmt(s, p->body.items[si]);
+                        }
+                        native_codegen_stmt__emit(s, nr_str_format("nr_arena_free(%s);", arena_n->id->data));
+                        s->indent = (int32_t)((s->indent - 1));
+                        native_codegen_stmt__emit(s, nr_str_new("}"));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    NrStr** cleanup_fns = malloc((16 * 8));
+    NrStr** var_names = malloc((16 * 8));
+    int32_t item_count = p->items.count;
+    for (int64_t i = 0; i < item_count; i++) {
+        NR_PREFETCH(&cleanup_fns[i + 8], 0, 1);
+        NR_PREFETCH(&var_names[i + 8], 0, 1);
+        AstWithItem* item = p->items.items[i]->data;
+        NrStr* enter_expr = native_codegen_expr_native_compile_expr(s, item->context_expr);
+        cleanup_fns[i] = NULL;
+        var_names[i] = NULL;
+        AstNode* ctx = item->context_expr;
+        if (((ctx != NULL) && (ctx->tag == TAG_CALL))) {
+            AstCall* cc = ctx->data;
+            AstNode* cf = cc->func;
+            if (((cf != NULL) && (cf->tag == TAG_NAME))) {
+                AstName* cfn = cf->data;
+                cleanup_fns[i] = native_codegen_stmt__infer_cleanup(cfn->id);
+            }
+        }
+        native_codegen_stmt__emit(s, nr_str_new("{"));
+        s->indent = (int32_t)((s->indent + 1));
+        if (((item->optional_vars != NULL) && (item->optional_vars->tag == TAG_NAME))) {
+            AstName* vn = item->optional_vars->data;
+            var_names[i] = vn->id;
+            native_codegen_stmt__emit(s, nr_str_format("__auto_type %s = %s;", vn->id->data, enter_expr->data));
+        } else {
+            native_codegen_stmt__emit(s, nr_str_format("%s;", enter_expr->data));
+        }
+    }
+    for (int64_t i = 0; i < p->body.count; i++) {
+        native_codegen_stmt_native_compile_stmt(s, p->body.items[i]);
+    }
+    for (int64_t i = 0; i < item_count; i++) {
+        int32_t idx = (int32_t)(((item_count - 1) - i));
+        if (((cleanup_fns[idx] != NULL) && (var_names[idx] != NULL))) {
+            native_codegen_stmt__emit(s, nr_str_format("%s(%s);", cleanup_fns[idx]->data, var_names[idx]->data));
+        }
+        s->indent = (int32_t)((s->indent - 1));
+        native_codegen_stmt__emit(s, nr_str_new("}"));
+    }
+    free(cleanup_fns);
+    free(var_names);
+}
+
+NrStr* native_codegen_stmt__aug_op_method(uint8_t op) {
+    if ((op == OP_ADD)) {
+        return nr_str_new("__add__");
+    }
+    if ((op == OP_SUB)) {
+        return nr_str_new("__sub__");
+    }
+    if ((op == OP_MULT)) {
+        return nr_str_new("__mul__");
+    }
+    if ((op == OP_DIV)) {
+        return nr_str_new("__truediv__");
+    }
+    if ((op == OP_MOD)) {
+        return nr_str_new("__mod__");
+    }
+    return NULL;
+}
+
+void native_codegen_stmt_native_compile_aug_assign(CompilerState* restrict s, const AstNode* restrict node) {
+    AstAugAssign* p = node->data;
+    NrStr* tgt_type = native_infer_native_infer_type(s, p->target);
+    NrStr* tgt_base = native_infer__strip_ptr(tgt_type);
+    if (strmap_strmap_has((&s->structs), tgt_base)) {
+        NrStr* method = native_codegen_stmt__aug_op_method(p->op);
+        if ((method != NULL)) {
+            NrStr* mname = nr_str_concat(nr_str_concat(tgt_base, (&(NrStr){.data=(char*)"_",.len=1})), method);
+            if (strmap_strmap_has((&s->func_ret_types), mname)) {
+                NrStr* tgt = native_codegen_expr_native_compile_expr(s, p->target);
+                NrStr* rhs = native_codegen_expr_native_compile_expr(s, p->value);
+                NrStr* self_arg = tgt;
+                if ((native_infer__ends_with_star(tgt_type) == 0)) {
+                    self_arg = nr_str_format("&(%s)", tgt->data);
+                }
+                native_codegen_stmt__emit(s, nr_str_format("%s = %s(%s, %s);", tgt->data, mname->data, self_arg->data, rhs->data));
+                return;
+            }
+        }
+    }
+    NrStr* tgt2 = native_codegen_expr_native_compile_expr(s, p->target);
+    NrStr* val = native_codegen_expr_native_compile_expr(s, p->value);
+    if ((s->safe_mode != 0)) {
+        if ((nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int64_t",.len=7})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int",.len=3})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"int32_t",.len=7})) || nr_str_eq(tgt_type, (&(NrStr){.data=(char*)"uint8_t",.len=7})))) {
+            if ((p->op == OP_DIV)) {
+                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_div_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
+                return;
+            }
+            if ((p->op == OP_MOD)) {
+                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_mod_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
+                return;
+            }
+            if ((p->op == OP_ADD)) {
+                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_add_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
+                return;
+            }
+            if ((p->op == OP_SUB)) {
+                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_sub_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
+                return;
+            }
+            if ((p->op == OP_MULT)) {
+                native_codegen_stmt__emit(s, nr_str_format("%s = nr_safe_mul_i64(%s, %s, __FILE__, __LINE__);", tgt2->data, tgt2->data, val->data));
+                return;
+            }
+        }
+    }
+    NrStr* op = native_codegen_expr_native_compile_op(p->op);
+    native_codegen_stmt__emit(s, nr_str_format("%s %s= %s;", tgt2->data, op->data, val->data));
+}
+
+void native_codegen_stmt_native_compile_raise(CompilerState* restrict s, const AstNode* restrict node) {
+    AstRaise* p = node->data;
+    if ((p->exc != NULL)) {
+        NrStr* msg = native_codegen_expr_native_compile_expr(s, p->exc);
+        NrStr* ret = s->current_func_ret_type;
+        if (((ret != NULL) && nr_str_starts_with(ret, nr_str_new("Result_")))) {
+            native_codegen_stmt__emit(s, nr_str_format("return %s_err(%s);", ret->data, msg->data));
+        } else {
+            native_codegen_stmt__emit(s, nr_str_format("fprintf(stderr, \"Error: %%s\\n\", %s); abort();", msg->data));
+        }
+    } else {
+        native_codegen_stmt__emit(s, nr_str_new("fprintf(stderr, \"raise with no argument\\n\"); abort();"));
+    }
 }
 
 void native_codegen_stmt_native_compile_stmt(CompilerState* restrict s, AstNode* restrict node) {

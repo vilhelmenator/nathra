@@ -205,7 +205,7 @@ class BuildRunner:
             try:
                 c_src, h_src, mod_info = compiler.compile_file(src_path, module_name)
             except CompileError as e:
-                print(f"Error: {e}", file=sys.stderr)
+                print(str(e), file=sys.stderr)
                 sys.exit(1)
             except Exception as e:
                 loc = f"{compiler._current_file}:{compiler._current_line}" if compiler._current_line else compiler._current_file

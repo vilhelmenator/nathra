@@ -23,7 +23,7 @@ from ast_nodes import OP_AND, OP_OR
 from ast_nodes import OP_EQ, OP_NOT_EQ, OP_LT, OP_LT_E, OP_GT, OP_GT_E, OP_IS, OP_IS_NOT, OP_IN, OP_NOT_IN
 from strmap import StrMap, StrSet, strmap_get, strmap_has, strset_has
 from native_compiler_state import CompilerState, FieldList, field_list_find
-from native_infer import native_infer_type, _strip_ptr, _ends_with_star
+from native_infer import native_infer_type, _strip_ptr, _ends_with_star, _is_scalar_ptr_base
 
 # Forward declaration for call dispatch (circular dep: call imports expr)
 # Can't import the module (circular), so declare the prototype directly.
@@ -391,6 +391,12 @@ def native_compile_expr(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         val2: str = native_compile_expr(s, p10.value)
         obj_type: str = native_infer_type(s, p10.value)
         if _ends_with_star(obj_type):
+            # `.value` on a scalar pointer → dereference. Struct fields keep ->.
+            base_t: str = _strip_ptr(obj_type)
+            if attr_name == "value" and _is_scalar_ptr_base(base_t) and strmap_has(addr_of(s.structs), base_t) == 0:
+                if s.safe_mode != 0 and p10.value is not None and p10.value.tag == TAG_NAME:
+                    _emit(s, str_format("nr_safe_null_check(%s, __FILE__, __LINE__);", val2.data))
+                return str_format("(*(%s))", val2.data)
             # Null check before pointer dereference (--safe)
             if s.safe_mode != 0 and p10.value is not None and p10.value.tag == TAG_NAME:
                 _emit(s, str_format("nr_safe_null_check(%s, __FILE__, __LINE__);", val2.data))

@@ -217,12 +217,21 @@ def build_once(args, source_dir) -> bool:
         name, hdrs = spec.split("=", 1)
         c_modules[name.strip()] = [h.strip() for h in hdrs.split(",")]
 
+    # Resolve --safe default from --mode if not explicitly set.
+    # dev/service → safety on; release → safety off.
+    _explicit_safe = getattr(args, 'safe', None)
+    _mode = getattr(args, 'mode', 'dev')
+    if _explicit_safe is None:
+        _safe = _mode in ("dev", "service")
+    else:
+        _safe = _explicit_safe
+
     compiler = Compiler(
         source_dir=source_dir,
         platform=args.platform,
         emit_line_directives=not getattr(args, 'no_line_directives', False),
         debug_mode=getattr(args, 'debug', False),
-        safe_mode=getattr(args, 'safe', False),
+        safe_mode=_safe,
         reorder_funcs=getattr(args, 'reorder_funcs', False),
         call_graph_report=getattr(args, 'call_graph', False),
         c_modules=c_modules,
@@ -230,7 +239,7 @@ def build_once(args, source_dir) -> bool:
     try:
         c_src, h_src, mod_info = compiler.compile_file(args.source, "__main__")
     except CompileError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(str(e), file=sys.stderr)
         return False
     except Exception as e:
         loc = f"{compiler._current_file}:{compiler._current_line}" if compiler._current_line else compiler._current_file
@@ -343,8 +352,14 @@ def main():
     parser.add_argument("--debug", action="store_true",
                         help="Enable allocation tracking: wraps alloc/free with counters, "
                              "asserts zero live allocations at exit")
-    parser.add_argument("--safe", action="store_true",
-                        help="Enable runtime safety checks: division by zero, bounds, overflow")
+    parser.add_argument("--mode", choices=["dev", "release", "service"],
+                        default="dev",
+                        help="Build mode (default: dev). dev/service enable --safe by default; "
+                             "release disables it. Use --safe/--no-safe to override.")
+    parser.add_argument("--safe", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Enable runtime safety checks: division by zero, bounds, overflow. "
+                             "Default depends on --mode (on for dev/service, off for release).")
     parser.add_argument("--reorder-funcs", action="store_true",
                         help="Reorder functions by call-graph weight for I-cache locality")
     parser.add_argument("--call-graph", action="store_true",

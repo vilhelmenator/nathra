@@ -57,6 +57,26 @@ _OS_PATH_FUNCS: dict[str, str] = {
     "ext": "nr_path_ext",
 }
 
+# Scalar bases for which `ptr.value` means dereference. Excludes runtime
+# types (NrStr, NrList, NrDict, ...) which keep -> semantics.
+_SCALAR_PTR_BASES = frozenset({
+    "int", "int8_t", "int16_t", "int32_t", "int64_t",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "float", "double",
+    "char", "bool", "byte", "size_t", "ssize_t", "intptr_t", "uintptr_t",
+    "void",  # ptr[void] — rare but legal
+})
+
+def _is_scalar_ptr_base(base: str) -> bool:
+    """True if `base*` is a pointer to a scalar type (suitable for .value)."""
+    if base in _SCALAR_PTR_BASES:
+        return True
+    # Treat user pointer aliases ending in another pointer (`int**`) as scalar
+    # so chains terminate cleanly.
+    if base.endswith("*"):
+        return True
+    return False
+
 
 class ExprMixin:
     # -------------------------------------------------------------------
@@ -80,6 +100,30 @@ class ExprMixin:
     # Null safety
     # -------------------------------------------------------------------
 
+    def _is_addressable_lvalue(self, node) -> bool:
+        """True if `node` is a value expression whose address can be taken.
+
+        Used by implicit addr_of at call sites — only safe to wrap with `&`
+        when the result has stable storage. Rvalue expressions (Call, BinOp,
+        Compare, IfExp, literals) are excluded.
+        """
+        if isinstance(node, ast.Name):
+            n = node.id
+            return (n in self.local_vars
+                    or n in self.func_args
+                    or n in self.mutable_globals
+                    or n in self.constants
+                    or n in self._array_vars)
+        if isinstance(node, ast.Attribute):
+            # Recurse: addressable iff base is addressable. Excludes module
+            # qualified names (mod.foo) since those are treated specially.
+            return self._is_addressable_lvalue(node.value)
+        if isinstance(node, ast.Subscript):
+            # Allow array/list subscript with a Name base whose array info exists
+            return (isinstance(node.value, ast.Name)
+                    and node.value.id in self._array_vars)
+        return False
+
     def _null_check_deref(self, var_name: str, compiled_expr: str) -> None:
         """Check null state of a pointer variable before dereference.
 
@@ -92,10 +136,14 @@ class ExprMixin:
             return  # not a tracked pointer variable
         if state == "null":
             from compiler.compiler import CompileError
-            print(f"{self._current_file or '?'}:{self._current_line or '?'}: error: "
-                  f"dereference of provably null pointer '{var_name}'",
-                  file=sys.stderr)
-            raise CompileError(f"dereference of provably null pointer '{var_name}'")
+            raise CompileError(
+                f"dereference of provably null pointer '{var_name}'",
+                file=self._current_file,
+                lineno=self._current_line,
+                code="C001",
+                hint=f"check '{var_name} is not None' before dereferencing, or "
+                     f"assign a non-None value before this point",
+            )
         if state == "unknown" and self.safe_mode:
             self.emit(f"nr_safe_null_check({compiled_expr}, __FILE__, __LINE__);")
 
@@ -413,6 +461,16 @@ class ExprMixin:
             # Use -> for pointer types; dispatch @property getters
             obj_type = self.infer_type(node.value)
             obj_base = obj_type.rstrip("*").strip()
+            # `.value` on a scalar pointer → dereference. Struct fields and
+            # runtime types (NrStr, NrList, ...) keep -> semantics, even if
+            # they happen to have a field literally named `value`.
+            if (attr == "value"
+                    and obj_type.endswith("*")
+                    and _is_scalar_ptr_base(obj_base)
+                    and obj_base not in self.structs):
+                if isinstance(node.value, ast.Name):
+                    self._null_check_deref(node.value.id, val)
+                return f"(*({val}))"
             props = self.struct_properties.get(obj_base, {})
             if attr in props:
                 if obj_type.endswith("*"):
@@ -545,6 +603,26 @@ class ExprMixin:
                         _s = _arg_node.value
                         _esc = _s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
                         args[_pi] = f'(&(NrStr){{.data=(char*)"{_esc}",.len={len(_s)}}})'
+                # Auto `addr_of` for value lvalues passed where the callee
+                # expects T*. Skips: already-pointer args, void*/const void*,
+                # NrStr* (string-literal coercion handles those), Constants,
+                # and rvalue expressions like Call/BinOp.
+                for _pi, _arg_node in enumerate(node.args):
+                    if _pi >= len(_ptypes):
+                        break
+                    _pt = _ptypes[_pi]
+                    if not _pt.endswith("*"):
+                        continue
+                    if _pt in ("void*", "const void*", "NrStr*"):
+                        continue
+                    if not self._is_addressable_lvalue(_arg_node):
+                        continue
+                    _at = self.infer_type(_arg_node)
+                    if _at == _pt:
+                        continue  # already a pointer of matching type
+                    if _at + "*" != _pt:
+                        continue  # type mismatch — let downstream warn
+                    args[_pi] = f"(&({args[_pi]}))"
 
         arg_str = ", ".join(args)
 

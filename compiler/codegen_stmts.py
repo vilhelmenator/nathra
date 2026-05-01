@@ -771,7 +771,7 @@ class StmtMixin:
         if "export" in decs:
             # Exported symbols must be globally visible — no static
             pass
-        elif "inline" in decs:
+        elif "inline" in decs or fname in self._inline_funcs:
             qualifiers.append("static inline")
         if "noinline" in decs:
             attrs.append("noinline")
@@ -978,10 +978,19 @@ class StmtMixin:
         # Build last-use map for ALL locals so we can detect scope-escape.
         # A variable declared inside a proposed scope that is used outside it
         # would go out of scope too early — that wrapping must be suppressed.
-        _all_local_decls = {}  # varname → decl_idx (all AnnAssign, not just structs)
+        _all_local_decls = {}  # varname → decl_idx (AnnAssign + plain Assign of new locals)
+        _seen_local_names: set = set()
         for _i, _stmt in enumerate(node.body):
             if isinstance(_stmt, ast.AnnAssign) and isinstance(_stmt.target, ast.Name):
                 _all_local_decls[_stmt.target.id] = _i
+                _seen_local_names.add(_stmt.target.id)
+            elif (isinstance(_stmt, ast.Assign)
+                    and len(_stmt.targets) == 1
+                    and isinstance(_stmt.targets[0], ast.Name)):
+                _vn2 = _stmt.targets[0].id
+                if _vn2 not in _seen_local_names:
+                    _all_local_decls[_vn2] = _i
+                    _seen_local_names.add(_vn2)
         _all_last_use = {}
         for _ovn, _odi in _all_local_decls.items():
             _olast = _odi
@@ -1560,6 +1569,61 @@ class StmtMixin:
                         elt_val = self.compile_expr(elt)
                         self.emit(f"{tgt}[{i}] = {elt_val};")
                     continue
+            # `p.value = rhs` on a scalar pointer → *(p) = rhs
+            if (isinstance(target, ast.Attribute)
+                    and target.attr == "value"):
+                from compiler.codegen_exprs import _is_scalar_ptr_base
+                _ot = self.infer_type(target.value)
+                _ob = _ot.rstrip("*").strip()
+                if (_ot.endswith("*") and _is_scalar_ptr_base(_ob)
+                        and _ob not in self.structs):
+                    _pe = self.compile_expr(target.value)
+                    if isinstance(target.value, ast.Name):
+                        self._null_check_deref(target.value.id, _pe)
+                    val = self.compile_expr(val_node)
+                    val = self._coerce(val, self.infer_type(val_node), _ob)
+                    self.emit(f"*({_pe}) = {val};")
+                    continue
+            # Local type inference: bare Name target not yet declared
+            if isinstance(target, ast.Name):
+                _name = target.id
+                _is_declared = (
+                    _name in self.local_vars
+                    or _name in self.func_args
+                    or _name in self.constants
+                    or _name in self.mutable_globals
+                    or _name in self._array_vars
+                    or _name in self._list_vars
+                    or _name in getattr(self, '_dict_vars', {})
+                    or _name in self._soa_vars
+                    or _name in self._str_literal_vars
+                )
+                if not _is_declared:
+                    inferred = self._try_infer_type(val_node)
+                    if inferred is not None:
+                        # String literal: emit stack NrStr, no malloc
+                        if (inferred == "NrStr*"
+                                and isinstance(val_node, ast.Constant)
+                                and isinstance(val_node.value, str)):
+                            self.local_vars[_name] = inferred
+                            s = val_node.value
+                            escaped = (s.replace("\\", "\\\\")
+                                        .replace('"', '\\"')
+                                        .replace("\n", "\\n"))
+                            self.emit(f'NrStr _lit_{_name} = {{.data=(char*)"{escaped}",.len={len(s)}}};')
+                            self.emit(f"NrStr* {_name} = &_lit_{_name};")
+                            self._str_literal_vars.add(_name)
+                            continue
+                        self.local_vars[_name] = inferred
+                        val = self.compile_expr(val_node)
+                        val = self._coerce(val, self.infer_type(val_node), inferred)
+                        # Heap-alloc auto-free for unannotated allocs
+                        if (isinstance(val_node, ast.Call)
+                                and isinstance(val_node.func, ast.Name)
+                                and val_node.func.id in _ALLOC_FUNCS):
+                            self._auto_free_vars.add(_name)
+                        self.emit(f"{inferred} {_name} = {val};")
+                        continue
             val = self.compile_expr(val_node)
             tgt = self.compile_expr(target)
             val = self._coerce(val, self.infer_type(val_node), self._dest_type(target))

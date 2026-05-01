@@ -30,6 +30,7 @@ struct CompilerState {
     StrMap struct_properties;
     StrMap result_types;
     StrSet cold_funcs;
+    StrSet inline_funcs;
     StrSet extern_funcs;
     StrSet serializable_structs;
     StrSet str_literal_vars;
@@ -77,6 +78,7 @@ struct ParamNameList {
     int32_t count;
 };
 
+ParamTypeList* native_compiler_state_param_type_list_new(int32_t count);
 CompilerState native_compiler_state_compiler_state_new(void);
 FieldList* native_compiler_state_field_list_new(int32_t count);
 NrStr* native_compiler_state_field_list_find(const FieldList* restrict fl, const NrStr* restrict name);

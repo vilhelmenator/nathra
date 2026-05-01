@@ -1,5 +1,72 @@
 # Language Reference
 
+### Local type inference
+
+Bare local assignments without an annotation infer the type from the
+right-hand side. Annotations always win — they are never overridden.
+
+```python
+def main() -> int:
+    a = 5            # int64_t (constant)
+    b = 3.14         # double  (constant)
+    s = "hello"      # NrStr*  (string literal — stack NrStr, no malloc)
+    n = doubler(a)   # int64_t (function return type)
+    sum = a + 10     # int64_t (BinOp on ints)
+    n8: int8_t = 5   # int8_t  — annotation wins over int64_t inference
+    print(sum)
+    return 0
+```
+
+Inference is conservative — if the compiler can't pin the type confidently,
+it falls back to the previous behavior (you'll get an error and add an
+annotation). Supported RHS forms: constants, named locals/args/globals,
+binary and unary ops, comparisons, `if/else` expressions, f-strings,
+attribute access on known structs, subscript on arrays/lists, and calls
+to functions with a registered return type.
+
+### `.value` on scalar pointers
+
+`p.value` reads through a scalar pointer; `p.value = x` writes; aug-assign
+works (`p.value += 1`). Struct fields named `value` keep their normal `.`
+or `->` semantics — the rewrite only fires on pointers whose pointee is a
+scalar type (`int`, `float`, etc.) and not a known struct or runtime type.
+
+```python
+def square(v: ptr[int]) -> void:
+    v.value = v.value * v.value
+
+def main() -> int:
+    n: int = 5
+    square(addr_of(n))
+    print(n)            # 25
+    return 0
+```
+
+### Implicit `addr_of` at call sites
+
+When a function takes `ptr[T]` and the caller passes a `T` lvalue, the
+compiler inserts the address-of for you. Only addressable lvalues qualify:
+local variables, struct fields, and array elements. Constants, calls, and
+arithmetic expressions don't auto-wrap — wrap those explicitly.
+
+```python
+struct Counter:
+    n: int
+
+def bump(c: ptr[Counter]) -> void:
+    c.n = c.n + 1
+
+def main() -> int:
+    c: Counter = Counter(0)
+    bump(c)             # auto: bump(&(c))
+    bump(c)
+    print(c.n)          # 2
+    return 0
+```
+
+If the caller already has a pointer of matching type, no rewrite happens
+(no double `&`). Pointer parameters typed `void*` or `const void*` are
+skipped — those are too ambiguous to auto-wrap safely.
 
 ### Types
 

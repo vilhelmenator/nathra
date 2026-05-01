@@ -25,13 +25,13 @@ from ast_nodes import deserialize_ast
 from strmap import StrMap, StrSet, strmap_new, strmap_free, strmap_get, strmap_set, strmap_has
 from strmap import strset_new, strset_free, strset_add, strset_has
 from native_compiler_state import CompilerState, FieldList, FieldEntry, field_list_new
-from native_compiler_state import compiler_state_new
+from native_compiler_state import compiler_state_new, ParamTypeList, param_type_list_new
 from native_type_map import native_map_type
 from native_infer import native_infer_type
 from native_codegen_expr import native_compile_expr
 from native_codegen_call import native_compile_call
 from native_codegen_stmt import native_compile_stmt
-from native_analysis import native_infer_cold_from_body, native_build_alloc_tags
+from native_analysis import native_infer_cold_from_body, native_build_alloc_tags, native_infer_inline_from_body
 
 # ── Emit helper ─────────────────────────────────────────────────────────
 
@@ -61,6 +61,13 @@ def _first_pass(s: ptr[CompilerState], body: AstNodeList) -> void:
             # Map return type
             ret_type: str = native_map_type(fd.returns)
             strmap_set(addr_of(s.func_ret_types), fd.name, ret_type)
+            # Build parameter type list (skip self for methods)
+            args_node: ptr[AstArguments] = fd.args.data
+            ptl: ptr[ParamTypeList] = param_type_list_new(args_node.args.count)
+            for k in range(args_node.args.count):
+                arg: ptr[AstArg] = args_node.args.items[k].data
+                ptl.types[k] = native_map_type(arg.annotation)
+            strmap_set(addr_of(s.func_param_types), fd.name, ptl)
             continue
 
         # Class definitions (structs or enums)
@@ -480,7 +487,13 @@ def _emit_function_prototypes(s: ptr[CompilerState], body: AstNodeList) -> void:
                 arg_str = str_new("...")
         elif args_node.args.count == 0:
             arg_str = str_new("void")
-        _emit_raw(s, str_format("%s %s(%s);", ret.data, fd.name.data, arg_str.data))
+        # Match the qualifier used at definition time (static inline must match
+        # the prototype, otherwise GCC errors on conflicting linkage).
+        proto_qual: str = str_new("")
+        if _has_decorator(fd, str_new("export")) == 0:
+            if _has_decorator(fd, str_new("inline")) != 0 or strset_has(addr_of(s.inline_funcs), fd.name) != 0:
+                proto_qual = str_new("static inline ")
+        _emit_raw(s, str_format("%s%s %s(%s);", proto_qual.data, ret.data, fd.name.data, arg_str.data))
     _emit_raw(s, str_new(""))
 
 def _is_extern_func(fd: ptr[AstFunctionDef]) -> int:
@@ -557,11 +570,20 @@ def _compile_one_func(s: ptr[CompilerState], fd: ptr[AstFunctionDef], prefix: st
     if str_len(prefix) > 0:
         fname = str_concat(prefix, fd.name)
 
-    # Emit function signature
+    # Emit function signature with optional `static inline` qualifier
+    qual: str = str_new("")
+    is_export: int = 0
+    if _has_decorator(fd, str_new("export")):
+        is_export = 1
+    has_inline_dec: int = 0
+    if _has_decorator(fd, str_new("inline")):
+        has_inline_dec = 1
+    if is_export == 0 and (has_inline_dec != 0 or strset_has(addr_of(s.inline_funcs), fname) != 0):
+        qual = str_new("static inline ")
     if fname == "main":
         _emit_raw(s, str_new("int main(void) {"))
     else:
-        _emit_raw(s, str_format("%s %s(%s) {", ret.data, fname.data, arg_str.data))
+        _emit_raw(s, str_format("%s%s %s(%s) {", qual.data, ret.data, fname.data, arg_str.data))
     s.indent = 1
 
     # Compile body
@@ -983,6 +1005,7 @@ def native_compile(ast_buf: ptr[u8], ast_len: i64,
 
     # Analysis passes
     native_infer_cold_from_body(addr_of(s), mod.body)
+    native_infer_inline_from_body(addr_of(s), mod.body)
     native_build_alloc_tags(addr_of(s), mod.body)
 
     # Emit C code
@@ -1119,6 +1142,7 @@ def native_compile_main(state: ptr[CompilerState],
 
     # Analysis
     native_infer_cold_from_body(state, mod.body)
+    native_infer_inline_from_body(state, mod.body)
     native_build_alloc_tags(state, mod.body)
 
     # Fresh output writer for main module

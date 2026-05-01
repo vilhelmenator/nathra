@@ -98,6 +98,11 @@ def native_infer_type(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         p5: ptr[AstAttribute] = node.data
         obj_type: str = native_infer_type(s, p5.value)
         base: str = _strip_ptr(obj_type)
+        # `.value` on a scalar pointer → pointee type
+        if (p5.attr == "value" and _ends_with_star(obj_type) != 0
+                and _is_scalar_ptr_base(base) != 0
+                and strmap_has(addr_of(s.structs), base) == 0):
+            return base
         fl: ptr[FieldList] = strmap_get(addr_of(s.structs), base)
         if fl is not None:
             ft: str = field_list_find(fl, p5.attr)
@@ -159,6 +164,145 @@ def native_infer_type(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         return str_new("NrList*")
 
     return str_new("int64_t")
+
+# ── try_infer_type ──────────────────────────────────────────────────────
+# Strict variant of native_infer_type: returns NULL when type is not
+# confidently known (instead of falling back to int64_t). Used by local
+# type inference for unannotated assignments.
+
+def native_try_infer_type(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
+    if node is None:
+        return None
+
+    if node.tag == TAG_CONSTANT:
+        p: ptr[AstConstant] = node.data
+        if p.kind == 3:
+            return str_new("int")
+        if p.kind == 0:
+            return str_new("int64_t")
+        if p.kind == 1:
+            return str_new("double")
+        if p.kind == 2:
+            return str_new("NrStr*")
+        return None
+
+    if node.tag == TAG_NAME:
+        p2: ptr[AstName] = node.data
+        name: str = p2.id
+        if name == "True" or name == "False":
+            return str_new("int")
+        t: str = strmap_get(addr_of(s.local_vars), name)
+        if t is not None:
+            return t
+        t = strmap_get(addr_of(s.func_args), name)
+        if t is not None:
+            return t
+        t = strmap_get(addr_of(s.constants), name)
+        if t is not None:
+            return t
+        t = strmap_get(addr_of(s.mutable_globals), name)
+        if t is not None:
+            return t
+        return None
+
+    if node.tag == TAG_BIN_OP:
+        p3: ptr[AstBinOp] = node.data
+        lt: str = native_try_infer_type(s, p3.left)
+        if lt is None:
+            return None
+        rt: str = native_try_infer_type(s, p3.right)
+        if rt is None:
+            return None
+        lb: str = _strip_ptr(lt)
+        if strmap_has(addr_of(s.structs), lb):
+            op_method: str = _binop_method_name(p3.op)
+            if op_method is not None:
+                method_name: str = str_concat(lb + "_", op_method)
+                ret: str = strmap_get(addr_of(s.func_ret_types), method_name)
+                if ret is not None:
+                    return ret
+        if lt == "double" or rt == "double":
+            return str_new("double")
+        if lt == "NrStr*" or rt == "NrStr*":
+            return str_new("NrStr*")
+        return str_new("int64_t")
+
+    if node.tag == TAG_UNARY_OP:
+        p4: ptr[AstUnaryOp] = node.data
+        if p4.op == 22:
+            return str_new("int")
+        return native_try_infer_type(s, p4.operand)
+
+    if node.tag == TAG_BOOL_OP or node.tag == TAG_COMPARE:
+        return str_new("int")
+
+    if node.tag == TAG_JOINED_STR:
+        return str_new("NrStr*")
+
+    if node.tag == TAG_ATTRIBUTE:
+        p5: ptr[AstAttribute] = node.data
+        obj_type: str = native_try_infer_type(s, p5.value)
+        if obj_type is None:
+            return None
+        base: str = _strip_ptr(obj_type)
+        # `.value` on a scalar pointer → pointee type
+        if (p5.attr == "value" and _ends_with_star(obj_type) != 0
+                and _is_scalar_ptr_base(base) != 0
+                and strmap_has(addr_of(s.structs), base) == 0):
+            return base
+        fl: ptr[FieldList] = strmap_get(addr_of(s.structs), base)
+        if fl is not None:
+            ft: str = field_list_find(fl, p5.attr)
+            if ft is not None:
+                if ft == "__array__":
+                    key: str = str_concat(base + ".", p5.attr)
+                    et: str = strmap_get(addr_of(s.struct_array_fields), key)
+                    if et is not None:
+                        return et
+                    return None
+                return ft
+        return None
+
+    if node.tag == TAG_SUBSCRIPT:
+        p6: ptr[AstSubscript] = node.data
+        sub_val: ptr[AstNode] = p6.value
+        if sub_val is not None and sub_val.tag == TAG_NAME:
+            vn: ptr[AstName] = sub_val.data
+            ai: ptr[ArrayInfo] = strmap_get(addr_of(s.array_vars), vn.id)
+            if ai is not None:
+                return ai.elem_type
+            et2: str = strmap_get(addr_of(s.list_vars), vn.id)
+            if et2 is not None:
+                return et2
+        return None
+
+    if node.tag == TAG_IF_EXP:
+        p7: ptr[AstIfExp] = node.data
+        tb: str = native_try_infer_type(s, p7.body)
+        if tb is None:
+            return None
+        te: str = native_try_infer_type(s, p7.orelse)
+        if te is None:
+            return None
+        if tb == te:
+            return tb
+        if (tb == "int64_t" and te == "double") or (tb == "double" and te == "int64_t"):
+            return str_new("double")
+        return None
+
+    if node.tag == TAG_CALL:
+        # Trust func_ret_types; otherwise NULL.
+        cn: ptr[AstCall] = node.data
+        if cn.func is not None and cn.func.tag == TAG_NAME:
+            fn: ptr[AstName] = cn.func.data
+            ret: str = strmap_get(addr_of(s.func_ret_types), fn.id)
+            if ret is not None:
+                return ret
+            if strmap_has(addr_of(s.structs), fn.id):
+                return fn.id
+        return None
+
+    return None
 
 # ── infer_call_type ─────────────────────────────────────────────────────
 
@@ -258,6 +402,37 @@ def _ends_with_star(t: str) -> int:
         return 0
     len: i64 = str_len(t)
     if len > 0 and cast(u8, t.data[len - 1]) == 42:
+        return 1
+    return 0
+
+def _is_scalar_ptr_base(base: str) -> int:
+    """True if `base*` is a pointer to a scalar type (suitable for .value).
+
+    Excludes runtime types (NrStr, NrList, NrDict, ...) and user structs —
+    those keep -> semantics even with a `value` field.
+    """
+    if base is None:
+        return 0
+    if base == "int":         return 1
+    if base == "int8_t":      return 1
+    if base == "int16_t":     return 1
+    if base == "int32_t":     return 1
+    if base == "int64_t":     return 1
+    if base == "uint8_t":     return 1
+    if base == "uint16_t":    return 1
+    if base == "uint32_t":    return 1
+    if base == "uint64_t":    return 1
+    if base == "float":       return 1
+    if base == "double":      return 1
+    if base == "char":        return 1
+    if base == "bool":        return 1
+    if base == "byte":        return 1
+    if base == "size_t":      return 1
+    if base == "ssize_t":     return 1
+    if base == "intptr_t":    return 1
+    if base == "uintptr_t":   return 1
+    if base == "void":        return 1
+    if _ends_with_star(base) != 0:
         return 1
     return 0
 

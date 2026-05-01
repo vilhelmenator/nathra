@@ -22,7 +22,7 @@ from ast_nodes import OP_ADD, OP_SUB, OP_MULT, OP_DIV, OP_MOD, OP_USUB
 from ast_nodes import AstUnaryOp, TAG_UNARY_OP
 from strmap import StrMap, strmap_get, strmap_has
 from native_compiler_state import CompilerState, FieldList, ArrayInfo
-from native_infer import native_infer_type, _strip_ptr, _ends_with_star
+from native_infer import native_infer_type, native_try_infer_type, _strip_ptr, _ends_with_star, _is_scalar_ptr_base
 from native_codegen_expr import native_compile_expr, native_compile_op
 from native_type_map import native_map_type
 
@@ -392,6 +392,39 @@ def native_compile_assign(s: ptr[CompilerState], node: ptr[AstNode]) -> void:
                     if d_vt == "double":
                         boxed_v = str_format("nr_val_float(%s)", val.data)
                     _emit(s, str_format("nr_dict_set(%s, %s, %s);", d_obj.data, d_key.data, boxed_v.data))
+                    continue
+        # `p.value = rhs` on a scalar pointer → *(p) = rhs
+        if tgt_node.tag == TAG_ATTRIBUTE:
+            ta: ptr[AstAttribute] = tgt_node.data
+            if ta.attr == "value":
+                ot: str = native_infer_type(s, ta.value)
+                ob: str = _strip_ptr(ot)
+                if (_ends_with_star(ot) != 0 and _is_scalar_ptr_base(ob) != 0
+                        and strmap_has(addr_of(s.structs), ob) == 0):
+                    pe: str = native_compile_expr(s, ta.value)
+                    _emit(s, str_format("*(%s) = %s;", pe.data, val.data))
+                    continue
+        # Local type inference: bare Name target not yet declared
+        if tgt_node.tag == TAG_NAME:
+            tn2: ptr[AstName] = tgt_node.data
+            already: int = 0
+            if strmap_has(addr_of(s.local_vars), tn2.id):
+                already = 1
+            if already == 0 and strmap_has(addr_of(s.func_args), tn2.id):
+                already = 1
+            if already == 0 and strmap_has(addr_of(s.constants), tn2.id):
+                already = 1
+            if already == 0 and strmap_has(addr_of(s.mutable_globals), tn2.id):
+                already = 1
+            if already == 0 and strmap_has(addr_of(s.array_vars), tn2.id):
+                already = 1
+            if already == 0 and strmap_has(addr_of(s.list_vars), tn2.id):
+                already = 1
+            if already == 0:
+                inferred: str = native_try_infer_type(s, p.value)
+                if inferred is not None:
+                    strmap_set(addr_of(s.local_vars), tn2.id, inferred)
+                    _emit(s, str_format("%s %s = %s;", inferred.data, tn2.id.data, val.data))
                     continue
         tgt: str = native_compile_expr(s, tgt_node)
         _emit(s, str_format("%s = %s;", tgt.data, val.data))

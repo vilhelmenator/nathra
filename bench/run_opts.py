@@ -73,7 +73,7 @@ def parse_rows(output):
 print("Building nathra version ...")
 run(
     [sys.executable, os.path.join(ROOT, "mpy.py"), BENCH_MPY,
-     f"--cc={CC}", f"--flags={' '.join(FLAGS)}"],
+     "--mode=release", f"--cc={CC}", f"--flags={' '.join(FLAGS)}"],
     env={**os.environ, "PYTHONPATH": ROOT},
 )
 

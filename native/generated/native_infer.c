@@ -1,11 +1,13 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595281.407572 */
 #include "nathra_rt.h"
 #include "native_infer.h"
 
 NrStr* native_infer_native_infer_type(CompilerState* restrict s, AstNode* restrict node);
+NrStr* native_infer_native_try_infer_type(CompilerState* restrict s, const AstNode* restrict node);
 NrStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstNode* restrict node);
 NrStr* native_infer__strip_ptr(const NrStr* t);
 int64_t native_infer__ends_with_star(const NrStr* t);
+int64_t native_infer__is_scalar_ptr_base(NrStr* base);
 NrStr* native_infer__binop_method_name(uint8_t op);
 int main(void);
 
@@ -25,6 +27,106 @@ NrStr* native_infer__strip_ptr(const NrStr* t) {
         }
     }
     return t;
+}
+
+int64_t native_infer__ends_with_star(const NrStr* t) {
+    "Check if type string ends with '*'.";
+    if ((t == NULL)) {
+        return 0;
+    }
+    int64_t len = nr_str_len(t);
+    if (((len > 0) && (((uint8_t)(t->data[(len - 1)])) == 42))) {
+        return 1;
+    }
+    return 0;
+}
+
+NrStr* native_infer__binop_method_name(uint8_t op) {
+    "Map operator tag to __method__ name for operator overloading.";
+    if ((op == OP_ADD)) {
+        return nr_str_new("__add__");
+    }
+    if ((op == OP_SUB)) {
+        return nr_str_new("__sub__");
+    }
+    if ((op == OP_MULT)) {
+        return nr_str_new("__mul__");
+    }
+    if ((op == OP_DIV)) {
+        return nr_str_new("__truediv__");
+    }
+    if ((op == OP_MOD)) {
+        return nr_str_new("__mod__");
+    }
+    return NULL;
+}
+
+int64_t native_infer__is_scalar_ptr_base(NrStr* base) {
+    "True if `base*` is a pointer to a scalar type (suitable for .value).\n\n    Excludes runtime types (NrStr, NrList, NrDict, ...) and user structs —\n    those keep -> semantics even with a `value` field.\n    ";
+    if ((base == NULL)) {
+        return 0;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"int",.len=3}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"int8_t",.len=6}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"int16_t",.len=7}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"int32_t",.len=7}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"int64_t",.len=7}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"uint8_t",.len=7}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"uint16_t",.len=8}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"uint32_t",.len=8}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"uint64_t",.len=8}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"float",.len=5}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"double",.len=6}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"char",.len=4}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"bool",.len=4}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"byte",.len=4}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"size_t",.len=6}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"ssize_t",.len=7}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"intptr_t",.len=8}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"uintptr_t",.len=9}))) {
+        return 1;
+    }
+    if (nr_str_eq(base, (&(NrStr){.data=(char*)"void",.len=4}))) {
+        return 1;
+    }
+    if ((native_infer__ends_with_star(base) != 0)) {
+        return 1;
+    }
+    return 0;
 }
 
 NrStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstNode* restrict node) {
@@ -100,38 +202,6 @@ NrStr* native_infer_native_infer_call_type(CompilerState* restrict s, const AstN
         }
     }
     return nr_str_new("int64_t");
-}
-
-NrStr* native_infer__binop_method_name(uint8_t op) {
-    "Map operator tag to __method__ name for operator overloading.";
-    if ((op == OP_ADD)) {
-        return nr_str_new("__add__");
-    }
-    if ((op == OP_SUB)) {
-        return nr_str_new("__sub__");
-    }
-    if ((op == OP_MULT)) {
-        return nr_str_new("__mul__");
-    }
-    if ((op == OP_DIV)) {
-        return nr_str_new("__truediv__");
-    }
-    if ((op == OP_MOD)) {
-        return nr_str_new("__mod__");
-    }
-    return NULL;
-}
-
-int64_t native_infer__ends_with_star(const NrStr* t) {
-    "Check if type string ends with '*'.";
-    if ((t == NULL)) {
-        return 0;
-    }
-    int64_t len = nr_str_len(t);
-    if (((len > 0) && (((uint8_t)(t->data[(len - 1)])) == 42))) {
-        return 1;
-    }
-    return 0;
 }
 
 NrStr* native_infer_native_infer_type(CompilerState* restrict s, AstNode* restrict node) {
@@ -216,6 +286,9 @@ NrStr* native_infer_native_infer_type(CompilerState* restrict s, AstNode* restri
         AstAttribute* p5 = node->data;
         NrStr* obj_type = native_infer_native_infer_type(s, p5->value);
         NrStr* base = native_infer__strip_ptr(obj_type);
+        if ((nr_str_eq(p5->attr, (&(NrStr){.data=(char*)"value",.len=5})) && (native_infer__ends_with_star(obj_type) != 0) && (native_infer__is_scalar_ptr_base(base) != 0) && (strmap_strmap_has((&s->structs), base) == 0))) {
+            return base;
+        }
         FieldList* fl = strmap_strmap_get((&s->structs), base);
         if ((fl != NULL)) {
             NrStr* ft = native_compiler_state_field_list_find(fl, p5->attr);
@@ -283,4 +356,168 @@ NrStr* native_infer_native_infer_type(CompilerState* restrict s, AstNode* restri
         return nr_str_new("NrList*");
     }
     return nr_str_new("int64_t");
+}
+
+NrStr* native_infer_native_try_infer_type(CompilerState* restrict s, const AstNode* restrict node) {
+    if ((node == NULL)) {
+        return NULL;
+    }
+    if ((node->tag == TAG_CONSTANT)) {
+        AstConstant* p = node->data;
+        if ((p->kind == 3)) {
+            return nr_str_new("int");
+        }
+        if ((p->kind == 0)) {
+            return nr_str_new("int64_t");
+        }
+        if ((p->kind == 1)) {
+            return nr_str_new("double");
+        }
+        if ((p->kind == 2)) {
+            return nr_str_new("NrStr*");
+        }
+        return NULL;
+    }
+    if ((node->tag == TAG_NAME)) {
+        AstName* p2 = node->data;
+        NrStr* name = p2->id;
+        if ((nr_str_eq(name, (&(NrStr){.data=(char*)"True",.len=4})) || nr_str_eq(name, (&(NrStr){.data=(char*)"False",.len=5})))) {
+            return nr_str_new("int");
+        }
+        NrStr* t = strmap_strmap_get((&s->local_vars), name);
+        if ((t != NULL)) {
+            return t;
+        }
+        t = strmap_strmap_get((&s->func_args), name);
+        if ((t != NULL)) {
+            return t;
+        }
+        t = strmap_strmap_get((&s->constants), name);
+        if ((t != NULL)) {
+            return t;
+        }
+        t = strmap_strmap_get((&s->mutable_globals), name);
+        if ((t != NULL)) {
+            return t;
+        }
+        return NULL;
+    }
+    if ((node->tag == TAG_BIN_OP)) {
+        AstBinOp* p3 = node->data;
+        NrStr* lt = native_infer_native_try_infer_type(s, p3->left);
+        if ((lt == NULL)) {
+            return NULL;
+        }
+        NrStr* rt = native_infer_native_try_infer_type(s, p3->right);
+        if ((rt == NULL)) {
+            return NULL;
+        }
+        NrStr* lb = native_infer__strip_ptr(lt);
+        if (strmap_strmap_has((&s->structs), lb)) {
+            NrStr* op_method = native_infer__binop_method_name(p3->op);
+            if ((op_method != NULL)) {
+                NrStr* method_name = nr_str_concat(nr_str_concat(lb, (&(NrStr){.data=(char*)"_",.len=1})), op_method);
+                NrStr* ret = strmap_strmap_get((&s->func_ret_types), method_name);
+                if ((ret != NULL)) {
+                    return ret;
+                }
+            }
+        }
+        if ((nr_str_eq(lt, (&(NrStr){.data=(char*)"double",.len=6})) || nr_str_eq(rt, (&(NrStr){.data=(char*)"double",.len=6})))) {
+            return nr_str_new("double");
+        }
+        if ((nr_str_eq(lt, (&(NrStr){.data=(char*)"NrStr*",.len=6})) || nr_str_eq(rt, (&(NrStr){.data=(char*)"NrStr*",.len=6})))) {
+            return nr_str_new("NrStr*");
+        }
+        return nr_str_new("int64_t");
+    }
+    if ((node->tag == TAG_UNARY_OP)) {
+        AstUnaryOp* p4 = node->data;
+        if ((p4->op == 22)) {
+            return nr_str_new("int");
+        }
+        return native_infer_native_try_infer_type(s, p4->operand);
+    }
+    if (((node->tag == TAG_BOOL_OP) || (node->tag == TAG_COMPARE))) {
+        return nr_str_new("int");
+    }
+    if ((node->tag == TAG_JOINED_STR)) {
+        return nr_str_new("NrStr*");
+    }
+    if ((node->tag == TAG_ATTRIBUTE)) {
+        AstAttribute* p5 = node->data;
+        NrStr* obj_type = native_infer_native_try_infer_type(s, p5->value);
+        if ((obj_type == NULL)) {
+            return NULL;
+        }
+        NrStr* base = native_infer__strip_ptr(obj_type);
+        if ((nr_str_eq(p5->attr, (&(NrStr){.data=(char*)"value",.len=5})) && (native_infer__ends_with_star(obj_type) != 0) && (native_infer__is_scalar_ptr_base(base) != 0) && (strmap_strmap_has((&s->structs), base) == 0))) {
+            return base;
+        }
+        FieldList* fl = strmap_strmap_get((&s->structs), base);
+        if ((fl != NULL)) {
+            NrStr* ft = native_compiler_state_field_list_find(fl, p5->attr);
+            if ((ft != NULL)) {
+                if (nr_str_eq(ft, (&(NrStr){.data=(char*)"__array__",.len=9}))) {
+                    NrStr* key = nr_str_concat(nr_str_concat(base, (&(NrStr){.data=(char*)".",.len=1})), p5->attr);
+                    NrStr* et = strmap_strmap_get((&s->struct_array_fields), key);
+                    if ((et != NULL)) {
+                        return et;
+                    }
+                    return NULL;
+                }
+                return ft;
+            }
+        }
+        return NULL;
+    }
+    if ((node->tag == TAG_SUBSCRIPT)) {
+        AstSubscript* p6 = node->data;
+        AstNode* sub_val = p6->value;
+        if (((sub_val != NULL) && (sub_val->tag == TAG_NAME))) {
+            AstName* vn = sub_val->data;
+            ArrayInfo* ai = strmap_strmap_get((&s->array_vars), vn->id);
+            if ((ai != NULL)) {
+                return ai->elem_type;
+            }
+            NrStr* et2 = strmap_strmap_get((&s->list_vars), vn->id);
+            if ((et2 != NULL)) {
+                return et2;
+            }
+        }
+        return NULL;
+    }
+    if ((node->tag == TAG_IF_EXP)) {
+        AstIfExp* p7 = node->data;
+        NrStr* tb = native_infer_native_try_infer_type(s, p7->body);
+        if ((tb == NULL)) {
+            return NULL;
+        }
+        NrStr* te = native_infer_native_try_infer_type(s, p7->orelse);
+        if ((te == NULL)) {
+            return NULL;
+        }
+        if (nr_str_eq(tb, te)) {
+            return tb;
+        }
+        if (((nr_str_eq(tb, (&(NrStr){.data=(char*)"int64_t",.len=7})) && nr_str_eq(te, (&(NrStr){.data=(char*)"double",.len=6}))) || (nr_str_eq(tb, (&(NrStr){.data=(char*)"double",.len=6})) && nr_str_eq(te, (&(NrStr){.data=(char*)"int64_t",.len=7}))))) {
+            return nr_str_new("double");
+        }
+        return NULL;
+    }
+    if ((node->tag == TAG_CALL)) {
+        AstCall* cn = node->data;
+        if (((cn->func != NULL) && (cn->func->tag == TAG_NAME))) {
+            AstName* fn = cn->func->data;
+            NrStr* ret = strmap_strmap_get((&s->func_ret_types), fn->id);
+            if ((ret != NULL)) {
+                return ret;
+            }
+            if (strmap_strmap_has((&s->structs), fn->id)) {
+                return fn->id;
+            }
+        }
+        return NULL;
+    }
+    return NULL;
 }

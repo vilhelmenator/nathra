@@ -1,4 +1,4 @@
-/* nth_stamp: 1774911850.086977 */
+/* nth_stamp: 1777595589.979964 */
 #include "nathra_rt.h"
 #include "native_codegen_call.h"
 
@@ -11,6 +11,7 @@ static inline BuiltinEntry _nr_make_BuiltinEntry(char* key, char* value) {
 
 BuiltinEntry builtin_map[152] = {(BuiltinEntry){"print_int", "nr_print_int"}, (BuiltinEntry){"print_float", "nr_print_float"}, (BuiltinEntry){"print_str", "nr_print_str"}, (BuiltinEntry){"print_bool", "nr_print_bool"}, (BuiltinEntry){"print_val", "nr_print_val"}, (BuiltinEntry){"list_new", "nr_list_new"}, (BuiltinEntry){"list_append", "nr_list_append"}, (BuiltinEntry){"list_get", "nr_list_get"}, (BuiltinEntry){"list_set", "nr_list_set"}, (BuiltinEntry){"list_len", "nr_list_len"}, (BuiltinEntry){"list_pop", "nr_list_pop"}, (BuiltinEntry){"list_free", "nr_list_free"}, (BuiltinEntry){"dict_new", "nr_dict_new"}, (BuiltinEntry){"dict_set", "nr_dict_set"}, (BuiltinEntry){"dict_get", "nr_dict_get"}, (BuiltinEntry){"dict_has", "nr_dict_has"}, (BuiltinEntry){"dict_del", "nr_dict_del"}, (BuiltinEntry){"dict_len", "nr_dict_len"}, (BuiltinEntry){"dict_free", "nr_dict_free"}, (BuiltinEntry){"str_new", "nr_str_new"}, (BuiltinEntry){"str_len", "nr_str_len"}, (BuiltinEntry){"str_concat", "nr_str_concat"}, (BuiltinEntry){"str_eq", "nr_str_eq"}, (BuiltinEntry){"str_print", "nr_str_print"}, (BuiltinEntry){"str_free", "nr_str_free"}, (BuiltinEntry){"str_from_int", "nr_str_from_int"}, (BuiltinEntry){"str_from_float", "nr_str_from_float"}, (BuiltinEntry){"str_contains", "nr_str_contains"}, (BuiltinEntry){"str_starts_with", "nr_str_starts_with"}, (BuiltinEntry){"str_ends_with", "nr_str_ends_with"}, (BuiltinEntry){"str_slice", "nr_str_slice"}, (BuiltinEntry){"str_find", "nr_str_find"}, (BuiltinEntry){"str_upper", "nr_str_upper"}, (BuiltinEntry){"str_lower", "nr_str_lower"}, (BuiltinEntry){"str_repeat", "nr_str_repeat"}, (BuiltinEntry){"to_int", "nr_val_to_int"}, (BuiltinEntry){"to_float", "nr_val_to_float"}, (BuiltinEntry){"as_int", "nr_as_int"}, (BuiltinEntry){"as_float", "nr_as_float"}, (BuiltinEntry){"val_int", "nr_val_int"}, (BuiltinEntry){"val_float", "nr_val_float"}, (BuiltinEntry){"val_str", "nr_val_str"}, (BuiltinEntry){"alloc", "malloc"}, (BuiltinEntry){"free", "free"}, (BuiltinEntry){"arena_new", "nr_arena_new"}, (BuiltinEntry){"arena_free", "nr_arena_free"}, (BuiltinEntry){"arena_reset", "nr_arena_reset"}, (BuiltinEntry){"arena_alloc", "nr_arena_alloc"}, (BuiltinEntry){"arena_list_new", "nr_arena_list_new"}, (BuiltinEntry){"arena_str_new", "nr_arena_str_new"}, (BuiltinEntry){"arena_str_new_len", "nr_arena_str_new_len"}, (BuiltinEntry){"read_file_bin", "nr_read_file_bin"}, (BuiltinEntry){"write_file_bin", "nr_write_file_bin"}, (BuiltinEntry){"open", "nr_file_open"}, (BuiltinEntry){"file_open", "nr_file_open"}, (BuiltinEntry){"file_open_safe", "nr_file_open_safe"}, (BuiltinEntry){"file_close", "nr_file_close"}, (BuiltinEntry){"file_write", "nr_file_write"}, (BuiltinEntry){"file_write_str", "nr_file_write_str"}, (BuiltinEntry){"file_write_line", "nr_file_write_line"}, (BuiltinEntry){"file_write_int", "nr_file_write_int"}, (BuiltinEntry){"file_write_float", "nr_file_write_float"}, (BuiltinEntry){"file_read_all", "nr_file_read_all"}, (BuiltinEntry){"file_read_line", "nr_file_read_line"}, (BuiltinEntry){"file_eof", "nr_file_eof"}, (BuiltinEntry){"file_exists", "nr_file_exists"}, (BuiltinEntry){"file_size", "nr_file_size"}, (BuiltinEntry){"dir_create", "nr_dir_create"}, (BuiltinEntry){"dir_remove", "nr_dir_remove"}, (BuiltinEntry){"dir_exists", "nr_dir_exists"}, (BuiltinEntry){"dir_list", "nr_dir_list"}, (BuiltinEntry){"dir_cwd", "nr_dir_cwd"}, (BuiltinEntry){"dir_chdir", "nr_dir_chdir"}, (BuiltinEntry){"path_join", "nr_path_join"}, (BuiltinEntry){"path_ext", "nr_path_ext"}, (BuiltinEntry){"path_basename", "nr_path_basename"}, (BuiltinEntry){"path_dirname", "nr_path_dirname"}, (BuiltinEntry){"remove_file", "nr_remove"}, (BuiltinEntry){"rename_file", "nr_rename"}, (BuiltinEntry){"thread_spawn", "nr_thread_spawn"}, (BuiltinEntry){"thread_join", "nr_thread_join"}, (BuiltinEntry){"mutex_new", "nr_mutex_new"}, (BuiltinEntry){"mutex_lock", "nr_mutex_lock"}, (BuiltinEntry){"mutex_unlock", "nr_mutex_unlock"}, (BuiltinEntry){"mutex_free", "nr_mutex_free"}, (BuiltinEntry){"cond_new", "nr_cond_new"}, (BuiltinEntry){"cond_wait", "nr_cond_wait"}, (BuiltinEntry){"cond_signal", "nr_cond_signal"}, (BuiltinEntry){"cond_broadcast", "nr_cond_broadcast"}, (BuiltinEntry){"cond_free", "nr_cond_free"}, (BuiltinEntry){"sleep_ms", "nr_sleep_ms"}, (BuiltinEntry){"atomic_add", "nr_atomic_add"}, (BuiltinEntry){"atomic_sub", "nr_atomic_sub"}, (BuiltinEntry){"atomic_load", "nr_atomic_load"}, (BuiltinEntry){"atomic_store", "nr_atomic_store"}, (BuiltinEntry){"atomic_cas", "nr_atomic_cas"}, (BuiltinEntry){"channel_new", "nr_channel_new"}, (BuiltinEntry){"channel_send", "nr_channel_send"}, (BuiltinEntry){"channel_recv", "nr_channel_recv"}, (BuiltinEntry){"channel_close", "nr_channel_close"}, (BuiltinEntry){"channel_free", "nr_channel_free"}, (BuiltinEntry){"channel_recv_val", "nr_channel_recv_val"}, (BuiltinEntry){"channel_drain", "nr_channel_drain"}, (BuiltinEntry){"channel_has_data", "nr_channel_has_data"}, (BuiltinEntry){"pool_new", "nr_pool_new"}, (BuiltinEntry){"pool_submit", "nr_pool_submit"}, (BuiltinEntry){"pool_shutdown", "nr_pool_shutdown"}, (BuiltinEntry){"parallel_for", "nr_parallel_for"}, (BuiltinEntry){"rand_seed", "nr_rand_seed"}, (BuiltinEntry){"rand_int", "nr_rand_int"}, (BuiltinEntry){"rand_float", "nr_rand_float"}, (BuiltinEntry){"time_now", "nr_time_now"}, (BuiltinEntry){"time_ms", "nr_time_ms"}, (BuiltinEntry){"str_format", "nr_str_format"}, (BuiltinEntry){"str_strip", "nr_str_strip"}, (BuiltinEntry){"str_lstrip", "nr_str_lstrip"}, (BuiltinEntry){"str_rstrip", "nr_str_rstrip"}, (BuiltinEntry){"str_split", "nr_str_split"}, (BuiltinEntry){"writer_new", "nr_writer_new"}, (BuiltinEntry){"writer_free", "nr_writer_free"}, (BuiltinEntry){"writer_pos", "nr_writer_pos"}, (BuiltinEntry){"write_bytes", "nr_write_bytes"}, (BuiltinEntry){"write_i8", "nr_write_i8"}, (BuiltinEntry){"write_i16", "nr_write_i16"}, (BuiltinEntry){"write_i32", "nr_write_i32"}, (BuiltinEntry){"write_i64", "nr_write_i64"}, (BuiltinEntry){"write_u8", "nr_write_u8"}, (BuiltinEntry){"write_u16", "nr_write_u16"}, (BuiltinEntry){"write_u32", "nr_write_u32"}, (BuiltinEntry){"write_u64", "nr_write_u64"}, (BuiltinEntry){"write_f32", "nr_write_f32"}, (BuiltinEntry){"write_f64", "nr_write_f64"}, (BuiltinEntry){"write_bool", "nr_write_bool"}, (BuiltinEntry){"write_str", "nr_write_str"}, (BuiltinEntry){"writer_to_bytes", "nr_writer_to_bytes"}, (BuiltinEntry){"reader_new", "nr_reader_new"}, (BuiltinEntry){"reader_free", "nr_reader_free"}, (BuiltinEntry){"reader_pos", "nr_reader_pos"}, (BuiltinEntry){"read_bytes", "nr_read_bytes"}, (BuiltinEntry){"read_i8", "nr_read_i8"}, (BuiltinEntry){"read_i16", "nr_read_i16"}, (BuiltinEntry){"read_i32", "nr_read_i32"}, (BuiltinEntry){"read_i64", "nr_read_i64"}, (BuiltinEntry){"read_u8", "nr_read_u8"}, (BuiltinEntry){"read_u16", "nr_read_u16"}, (BuiltinEntry){"read_u32", "nr_read_u32"}, (BuiltinEntry){"read_u64", "nr_read_u64"}, (BuiltinEntry){"read_f32", "nr_read_f32"}, (BuiltinEntry){"read_f64", "nr_read_f64"}, (BuiltinEntry){"read_bool", "nr_read_bool"}, (BuiltinEntry){"read_str", "nr_read_str"}, (BuiltinEntry){"", ""}};
 
+int64_t native_codegen_call__is_addressable_lvalue(CompilerState* restrict s, const AstNode* restrict node);
 char* native_codegen_call_lookup_builtin(const NrStr* name);
 NrStr* native_codegen_call_native_call_type_cast(CompilerState* restrict s, const NrStr* restrict fname, const AstCall* restrict node, const NrStr* restrict arg_str);
 NrStr* native_codegen_call_native_call_ptr_ops(CompilerState* restrict s, const NrStr* restrict fname, const AstCall* restrict node, const NrStr* restrict arg_str);
@@ -21,6 +22,47 @@ NrStr* native_codegen_call_native_compile_print(CompilerState* restrict s, const
 void native_codegen_call__emit_line(CompilerState* restrict s, const NrStr* restrict line);
 NrStr* native_codegen_call_native_compile_call(CompilerState* restrict s, const AstNode* restrict node);
 int main(void);
+
+int64_t native_codegen_call__is_addressable_lvalue(CompilerState* restrict s, const AstNode* restrict node) {
+    "True if `node` is an addressable value expression — Name in scope,\n    Attribute on an addressable base, or Subscript of a known array.";
+    if ((node == NULL)) {
+        return 0;
+    }
+    if ((node->tag == TAG_NAME)) {
+        AstName* n = node->data;
+        if (strmap_strmap_has((&s->local_vars), n->id)) {
+            return 1;
+        }
+        if (strmap_strmap_has((&s->func_args), n->id)) {
+            return 1;
+        }
+        if (strmap_strmap_has((&s->mutable_globals), n->id)) {
+            return 1;
+        }
+        if (strmap_strmap_has((&s->constants), n->id)) {
+            return 1;
+        }
+        if (strmap_strmap_has((&s->array_vars), n->id)) {
+            return 1;
+        }
+        return 0;
+    }
+    if ((node->tag == TAG_ATTRIBUTE)) {
+        AstAttribute* a = node->data;
+        return native_codegen_call__is_addressable_lvalue(s, a->value);
+    }
+    if ((node->tag == TAG_SUBSCRIPT)) {
+        AstSubscript* sb = node->data;
+        if (((sb->value != NULL) && (sb->value->tag == TAG_NAME))) {
+            AstName* sn = sb->value->data;
+            if (strmap_strmap_has((&s->array_vars), sn->id)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
 
 char* native_codegen_call_lookup_builtin(const NrStr* name) {
     "Look up a builtin function name. Returns C name or NULL.";
@@ -222,6 +264,41 @@ NrStr* native_codegen_call_native_compile_call(CompilerState* restrict s, const 
         for (int64_t i = 0; i < pc->args.count; i++) {
             NR_PREFETCH(&arg_parts[i + 8], 0, 1);
             arg_parts[i] = native_codegen_expr_native_compile_expr(s, pc->args.items[i]);
+        }
+    }
+    if (((pc->args.count > 0) && (func->tag == TAG_NAME))) {
+        AstName* cn_fn = func->data;
+        ParamTypeList* ptl_lookup = strmap_strmap_get((&s->func_param_types), cn_fn->id);
+        if ((ptl_lookup != NULL)) {
+            for (int64_t ai = 0; ai < pc->args.count; ai++) {
+                NR_PREFETCH(&arg_parts[ai + 8], 0, 1);
+                if ((ai >= ptl_lookup->count)) {
+                    break;
+                }
+                NrStr* pt = ptl_lookup->types[ai];
+                if ((pt == NULL)) {
+                    continue;
+                }
+                if ((native_infer__ends_with_star(pt) == 0)) {
+                    continue;
+                }
+                if ((nr_str_eq(pt, (&(NrStr){.data=(char*)"void*",.len=5})) || nr_str_eq(pt, (&(NrStr){.data=(char*)"const void*",.len=11})) || nr_str_eq(pt, (&(NrStr){.data=(char*)"NrStr*",.len=6})))) {
+                    continue;
+                }
+                AstNode* arg_node = pc->args.items[ai];
+                if ((native_codegen_call__is_addressable_lvalue(s, arg_node) == 0)) {
+                    continue;
+                }
+                NrStr* at = native_infer_native_infer_type(s, arg_node);
+                if (nr_str_eq(at, pt)) {
+                    continue;
+                }
+                NrStr* expected = nr_str_concat(at, nr_str_new("*"));
+                if ((nr_str_eq(expected, pt) == 0)) {
+                    continue;
+                }
+                arg_parts[ai] = nr_str_format("(&(%s))", arg_parts[ai]->data);
+            }
         }
     }
     NrStr* arg_str = nr_str_new("");

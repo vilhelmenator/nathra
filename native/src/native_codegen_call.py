@@ -13,11 +13,44 @@ compile_stmt. For now those fall through to a TODO marker.
 from nathra_stubs import alloc, free
 from ast_nodes import AstNode, AstNodeList, AstName, AstConstant, AstCall
 from ast_nodes import AstAttribute, AstSubscript
-from ast_nodes import TAG_NAME, TAG_ATTRIBUTE, TAG_CONSTANT, CONST_STR, AstConstant
+from ast_nodes import TAG_NAME, TAG_ATTRIBUTE, TAG_CONSTANT, TAG_SUBSCRIPT, CONST_STR, AstConstant
 from strmap import StrMap, strmap_get, strmap_has
 from native_compiler_state import CompilerState, FieldList, field_list_find, ArrayInfo
+from native_compiler_state import ParamTypeList
 from native_infer import native_infer_type, _strip_ptr, _ends_with_star
 from native_codegen_expr import native_compile_expr
+
+# ── Address-taken predicate (for auto addr_of) ─────────────────────────
+
+def _is_addressable_lvalue(s: ptr[CompilerState], node: ptr[AstNode]) -> int:
+    """True if `node` is an addressable value expression — Name in scope,
+    Attribute on an addressable base, or Subscript of a known array."""
+    if node is None:
+        return 0
+    if node.tag == TAG_NAME:
+        n: ptr[AstName] = node.data
+        if strmap_has(addr_of(s.local_vars), n.id):
+            return 1
+        if strmap_has(addr_of(s.func_args), n.id):
+            return 1
+        if strmap_has(addr_of(s.mutable_globals), n.id):
+            return 1
+        if strmap_has(addr_of(s.constants), n.id):
+            return 1
+        if strmap_has(addr_of(s.array_vars), n.id):
+            return 1
+        return 0
+    if node.tag == TAG_ATTRIBUTE:
+        a: ptr[AstAttribute] = node.data
+        return _is_addressable_lvalue(s, a.value)
+    if node.tag == TAG_SUBSCRIPT:
+        sb: ptr[AstSubscript] = node.data
+        if sb.value is not None and sb.value.tag == TAG_NAME:
+            sn: ptr[AstName] = sb.value.data
+            if strmap_has(addr_of(s.array_vars), sn.id):
+                return 1
+        return 0
+    return 0
 
 # ── Builtins table ──────────────────────────────────────────────────────
 
@@ -296,6 +329,32 @@ def native_compile_call(s: ptr[CompilerState], node: ptr[AstNode]) -> str:
         arg_parts = alloc(cast_int(pc.args.count) * 8)
         for i in range(pc.args.count):
             arg_parts[i] = native_compile_expr(s, pc.args.items[i])
+
+    # Auto addr_of: when callee expects T* and arg is a T-typed lvalue, wrap.
+    if pc.args.count > 0 and func.tag == TAG_NAME:
+        cn_fn: ptr[AstName] = func.data
+        ptl_lookup: ptr[ParamTypeList] = strmap_get(addr_of(s.func_param_types), cn_fn.id)
+        if ptl_lookup is not None:
+            for ai in range(pc.args.count):
+                if ai >= ptl_lookup.count:
+                    break
+                pt: str = ptl_lookup.types[ai]
+                if pt is None:
+                    continue
+                if _ends_with_star(pt) == 0:
+                    continue
+                if pt == "void*" or pt == "const void*" or pt == "NrStr*":
+                    continue
+                arg_node: ptr[AstNode] = pc.args.items[ai]
+                if _is_addressable_lvalue(s, arg_node) == 0:
+                    continue
+                at: str = native_infer_type(s, arg_node)
+                if at == pt:
+                    continue
+                expected: str = str_concat(at, str_new("*"))
+                if str_eq(expected, pt) == 0:
+                    continue
+                arg_parts[ai] = str_format("(&(%s))", arg_parts[ai].data)
 
     # Build arg_str
     arg_str: str = str_new("")
